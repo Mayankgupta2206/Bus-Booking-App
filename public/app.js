@@ -266,7 +266,10 @@ function renderShell() {
       ${canManage() ? linkBtn('#/admin/users', 'Users') : ''}
       <div class="usermenu">
         <button id="umBtn">${esc(state.user.name)} (${esc(state.user.role)}) ▾</button>
-        <div class="usermenu-drop hidden" id="umDrop"><button id="logoutBtn">Logout</button></div>
+        <div class="usermenu-drop hidden" id="umDrop">
+          <button id="pwaInstallMenuBtn">📲 Install App</button>
+          <button id="logoutBtn">Logout</button>
+        </div>
       </div>
     </div>
   </div>
@@ -278,6 +281,8 @@ function attachShell() {
   umBtn.onclick = (e) => { e.stopPropagation(); umDrop.classList.toggle('hidden'); };
   document.addEventListener('click', () => umDrop.classList.add('hidden'), { once: true });
   document.getElementById('logoutBtn').onclick = logout;
+  const pwaBtn = document.getElementById('pwaInstallMenuBtn');
+  if (pwaBtn) pwaBtn.onclick = () => triggerAppInstall();
 
   const topSearchInput = document.getElementById('topNavSearch');
   const topSearchBtn = document.getElementById('topNavSearchBtn');
@@ -2468,3 +2473,56 @@ window.addEventListener('hashchange', () => {
     nav(h, false);
   }
 });
+
+/* ---------- Mobile PWA & Service Worker ---------- */
+let deferredInstallPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  showPwaBanner();
+});
+
+function showPwaBanner() {
+  if (document.getElementById('pwaBanner') || !deferredInstallPrompt) return;
+  const banner = document.createElement('div');
+  banner.id = 'pwaBanner';
+  banner.className = 'pwa-banner no-print';
+  banner.innerHTML = `
+    <div class="pwa-banner-text">
+      <img src="/icon.svg" class="pwa-banner-icon" alt="Seva App">
+      <div><b>Install Seva Mobile App</b><div style="font-size:11px;opacity:0.8;">One-tap access on your home screen</div></div>
+    </div>
+    <div class="pwa-banner-actions">
+      <button class="pwa-install-btn" id="pwaInstallBtn">Install</button>
+      <button class="pwa-close-btn" id="pwaCloseBtn" title="Dismiss">×</button>
+    </div>
+  `;
+  document.body.appendChild(banner);
+  document.getElementById('pwaInstallBtn').onclick = triggerAppInstall;
+  document.getElementById('pwaCloseBtn').onclick = () => banner.remove();
+}
+
+async function triggerAppInstall() {
+  if (deferredInstallPrompt) {
+    deferredInstallPrompt.prompt();
+    const { outcome } = await deferredInstallPrompt.userChoice;
+    if (outcome === 'accepted') {
+      const banner = document.getElementById('pwaBanner');
+      if (banner) banner.remove();
+    }
+    deferredInstallPrompt = null;
+  } else {
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+    if (isIOS) {
+      alert("To install on iPhone/iPad:\n1. Tap the Share button (box with arrow)\n2. Select 'Add to Home Screen' ➕");
+    } else {
+      toast("To install on phone: Open in Chrome, tap (⋮) Menu and choose 'Install App' or 'Add to Home screen'");
+    }
+  }
+}
+
+if ('serviceWorker' in navigator && window.location.protocol.startsWith('http')) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch((err) => console.log('SW registration error:', err));
+  });
+}
