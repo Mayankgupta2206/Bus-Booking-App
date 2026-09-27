@@ -284,9 +284,9 @@ function seedIfEmpty() {
   }
 
   const insertUser = db.prepare('INSERT INTO users (username,password_hash,name,role) VALUES (?,?,?,?)');
-  insertUser.run('admin', bcrypt.hashSync('admin', 10), 'Adminstration', 'Admin@321');
-  insertUser.run('agent', bcrypt.hashSync('agent', 10), 'Agent', 'Agent321');
-  insertUser.run('supervisor', bcrypt.hashSync('Supervisor', 10), 'Supervisor', 'Supervisor321');
+  insertUser.run('admin', bcrypt.hashSync('Admin@321', 10), 'Administrator', 'Admin');
+  insertUser.run('agent', bcrypt.hashSync('Agent321', 10), 'Agent', 'Agent');
+  insertUser.run('supervisor', bcrypt.hashSync('Supervisor321', 10), 'Supervisor', 'Supervisor');
 
   const insertRoute = db.prepare('INSERT INTO routes (name,source,destination,fare) VALUES (?,?,?,?)');
   const r1 = insertRoute.run('Temple A → Town B', 'Temple A', 'Town B', 150).lastInsertRowid;
