@@ -251,12 +251,24 @@ function renderShell() {
   const linkBtn = (path, label) => `<button class="navlink ${r.startsWith(path) ? 'active' : ''} no-print" data-nav="${path}">${label}</button>`;
   return `
   <div class="topnav no-print">
-    <div class="brand" data-nav="#/dashboard"><div class="mark">S</div>Seva Bus Booking</div>
-    <div class="nav-search no-print">
+    <div class="brand" data-nav="#/dashboard"><div class="mark">S</div>Seva Bus</div>
+    
+    <div class="nav-search no-print" id="navSearchBox">
       <input id="topNavSearch" placeholder="Search PNR or phone..." value="${esc(searchCtx.q || '')}">
       <button id="topNavSearchBtn" title="Search">🔍</button>
     </div>
-    <div class="navlinks">
+
+    <!-- Mobile Action Buttons -->
+    <div class="mobile-actions no-print">
+      <button type="button" class="mobile-icon-btn" id="mobileSearchToggle" title="Search">🔍</button>
+      <button type="button" class="mobile-icon-btn" id="mobileMenuToggle" title="Menu">☰</button>
+    </div>
+
+    <div class="navlinks" id="navLinksWrap">
+      <div class="mobile-user-card mobile-only-item">
+        <div class="mobile-user-name">👤 ${esc(state.user.name)}</div>
+        <div class="mobile-user-role">${esc(state.user.role)}</div>
+      </div>
       ${linkBtn('#/dashboard', 'Dashboard')}
       ${canBook() ? linkBtn('#/booking', 'Create Booking') : ''}
       ${linkBtn('#/manifest', 'View Manifest')}
@@ -264,7 +276,10 @@ function renderShell() {
       ${canManage() ? linkBtn('#/admin/buses', 'Buses & Layouts') : ''}
       ${canManage() ? linkBtn('#/admin/routes-trips', 'Routes & Trips') : ''}
       ${canManage() ? linkBtn('#/admin/users', 'Users') : ''}
-      <div class="usermenu">
+      <button type="button" class="navlink mobile-only-item" id="pwaMobileInstallBtn">📲 Install Mobile App</button>
+      <button type="button" class="navlink mobile-only-item" id="mobileLogoutBtn" style="color:#DC2626;">🚪 Logout</button>
+
+      <div class="usermenu desktop-only-item">
         <button id="umBtn">${esc(state.user.name)} (${esc(state.user.role)}) ▾</button>
         <div class="usermenu-drop hidden" id="umDrop">
           <button id="pwaInstallMenuBtn">📲 Install App</button>
@@ -276,13 +291,59 @@ function renderShell() {
   <main id="main">${routeContent()}</main>`;
 }
 function attachShell() {
-  document.querySelectorAll('[data-nav]').forEach((el) => el.onclick = () => nav(el.getAttribute('data-nav') || '#/dashboard'));
+  const navWrap = document.getElementById('navLinksWrap');
+  const menuToggle = document.getElementById('mobileMenuToggle');
+  const searchToggle = document.getElementById('mobileSearchToggle');
+  const searchBox = document.getElementById('navSearchBox');
+
+  if (menuToggle && navWrap) {
+    menuToggle.onclick = (e) => {
+      e.stopPropagation();
+      navWrap.classList.toggle('mobile-open');
+    };
+  }
+
+  if (searchToggle && searchBox) {
+    searchToggle.onclick = (e) => {
+      e.stopPropagation();
+      searchBox.classList.toggle('mobile-search-visible');
+      if (searchBox.classList.contains('mobile-search-visible')) {
+        document.getElementById('topNavSearch')?.focus();
+      }
+    };
+  }
+
+  document.querySelectorAll('[data-nav]').forEach((el) => {
+    el.onclick = () => {
+      if (navWrap) navWrap.classList.remove('mobile-open');
+      nav(el.getAttribute('data-nav') || '#/dashboard');
+    };
+  });
+
+  document.addEventListener('click', (e) => {
+    if (navWrap && !navWrap.contains(e.target) && e.target !== menuToggle) {
+      navWrap.classList.remove('mobile-open');
+    }
+  });
+
   const umBtn = document.getElementById('umBtn'), umDrop = document.getElementById('umDrop');
-  umBtn.onclick = (e) => { e.stopPropagation(); umDrop.classList.toggle('hidden'); };
-  document.addEventListener('click', () => umDrop.classList.add('hidden'), { once: true });
-  document.getElementById('logoutBtn').onclick = logout;
+  if (umBtn && umDrop) {
+    umBtn.onclick = (e) => { e.stopPropagation(); umDrop.classList.toggle('hidden'); };
+    document.addEventListener('click', () => umDrop.classList.add('hidden'), { once: true });
+  }
+
+  const logoutBtn = document.getElementById('logoutBtn');
+  if (logoutBtn) logoutBtn.onclick = logout;
+  const mobileLogoutBtn = document.getElementById('mobileLogoutBtn');
+  if (mobileLogoutBtn) mobileLogoutBtn.onclick = logout;
+
   const pwaBtn = document.getElementById('pwaInstallMenuBtn');
   if (pwaBtn) pwaBtn.onclick = () => triggerAppInstall();
+  const mobilePwaBtn = document.getElementById('pwaMobileInstallBtn');
+  if (mobilePwaBtn) mobilePwaBtn.onclick = () => {
+    if (navWrap) navWrap.classList.remove('mobile-open');
+    triggerAppInstall();
+  };
 
   const topSearchInput = document.getElementById('topNavSearch');
   const topSearchBtn = document.getElementById('topNavSearchBtn');
@@ -290,6 +351,8 @@ function attachShell() {
     const q = topSearchInput.value.trim();
     if (!q) { toast('Please enter a PNR, phone number, or passenger name'); return; }
     searchCtx.q = q;
+    if (searchBox) searchBox.classList.remove('mobile-search-visible');
+    if (navWrap) navWrap.classList.remove('mobile-open');
     nav('#/search');
     triggerSearch();
   };
