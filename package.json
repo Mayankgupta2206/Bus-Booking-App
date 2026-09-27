@@ -17,5 +17,8 @@
     "express": "^4.19.2",
     "express-rate-limit": "^8.7.0",
     "jsonwebtoken": "^9.0.2"
+  },
+  "engines": {
+    "node": "20.x"
   }
 }
