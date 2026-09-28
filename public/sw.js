@@ -1,13 +1,13 @@
-const CACHE_NAME = 'seva-bus-v2';
+const CACHE_NAME = 'seva-bus-v3';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
   '/style.css?v=2',
   '/app.js?v=2',
   '/manifest.json',
-  '/icon.svg',
   '/icon-192.png',
-  '/icon-512.png'
+  '/icon-512.png',
+  '/apple-touch-icon.png'
 ];
 
 self.addEventListener('install', (event) => {
