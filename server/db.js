@@ -1,14 +1,41 @@
 const path = require('path');
 const fs = require('fs');
-const Database = require('better-sqlite3');
 const bcrypt = require('bcryptjs');
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'seva.db');
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
-const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
+let db;
+const isTurso = Boolean(process.env.TURSO_DATABASE_URL && process.env.TURSO_AUTH_TOKEN);
+
+if (isTurso) {
+  const LibsqlDatabase = require('libsql');
+  const TURSO_REPLICA_PATH = path.join(path.dirname(DB_PATH), 'turso_replica.db');
+  console.log(`Connecting to Turso Cloud SQLite (${process.env.TURSO_DATABASE_URL})...`);
+  db = new LibsqlDatabase(TURSO_REPLICA_PATH, {
+    syncUrl: process.env.TURSO_DATABASE_URL,
+    authToken: process.env.TURSO_AUTH_TOKEN,
+    syncPeriod: 30
+  });
+  try {
+    db.sync();
+    console.log('Turso Cloud SQLite synced successfully!');
+  } catch (err) {
+    console.warn('Initial Turso sync notice:', err.message);
+  }
+} else {
+  const Database = require('better-sqlite3');
+  db = new Database(DB_PATH);
+  db.pragma('journal_mode = WAL');
+}
+
 db.pragma('foreign_keys = ON');
+
+db.syncCloud = () => {
+  if (isTurso && typeof db.sync === 'function') {
+    try { db.sync(); } catch (err) { /* background sync */ }
+  }
+};
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
