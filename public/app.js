@@ -210,12 +210,10 @@ function renderLogin() {
     <div class="login-card">
       <div class="login-mark">S</div>
       <h1>Seva Bus Booking</h1>
-      <div class="login-sub">Staff login</div>
       <div id="loginErr" class="banner banner-err hidden">Invalid username or password.</div>
       <div class="field"><label for="lu">Username</label><input id="lu" type="text" placeholder="Enter your username"></div>
       <div class="field"><label for="lp">Password</label><input id="lp" type="password" placeholder="Enter your password"></div>
       <button class="btn btn-primary btn-block" id="loginBtn">Login</button>
-      <div class="demo-hint">Demo: admin/admin · agent/agent · supervisor/supervisor</div>
     </div>
   </div>`;
 }
