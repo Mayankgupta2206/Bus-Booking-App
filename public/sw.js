@@ -1,9 +1,9 @@
-const CACHE_NAME = 'seva-bus-v1';
+const CACHE_NAME = 'seva-bus-v2';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
-  '/style.css',
-  '/app.js',
+  '/style.css?v=2',
+  '/app.js?v=2',
   '/manifest.json',
   '/icon.svg',
   '/icon-192.png',
@@ -11,8 +11,9 @@ const STATIC_ASSETS = [
 ];
 
 self.addEventListener('install', (event) => {
+  self.skipWaiting();
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(STATIC_ASSETS)).then(() => self.skipWaiting())
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(STATIC_ASSETS)).catch(() => {})
   );
 });
 
@@ -25,28 +26,17 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
-  const url = new URL(event.request.url);
-
-  // Network-first for API requests
-  if (url.pathname.startsWith('/api')) {
-    event.respondWith(
-      fetch(event.request).catch(() => caches.match(event.request))
-    );
-    return;
-  }
-
-  // Cache-first, network fallback for static assets
+  // Network-first strategy: always fetch fresh from network, fall back to cache when offline
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      if (cached) return cached;
-      return fetch(event.request).then((response) => {
+    fetch(event.request)
+      .then((response) => {
         if (!response || response.status !== 200 || response.type !== 'basic') {
           return response;
         }
         const toCache = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, toCache));
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, toCache)).catch(() => {});
         return response;
-      });
-    })
+      })
+      .catch(() => caches.match(event.request))
   );
 });
