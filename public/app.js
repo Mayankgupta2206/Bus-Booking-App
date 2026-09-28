@@ -288,7 +288,31 @@ function renderShell() {
       </div>
     </div>
   </div>
-  <main id="main">${routeContent()}</main>`;
+  <main id="main">${routeContent()}</main>
+
+  <div class="mobile-bottom-bar no-print">
+    <button class="mbar-btn ${r === '#/dashboard' ? 'active' : ''}" data-nav="#/dashboard">
+      <span class="mbar-icon">📊</span>
+      <span class="mbar-text">Dashboard</span>
+    </button>
+    ${canBook() ? `
+    <button class="mbar-btn ${r.startsWith('#/booking') ? 'active' : ''}" data-nav="#/booking">
+      <span class="mbar-icon">🎫</span>
+      <span class="mbar-text">Book</span>
+    </button>` : ''}
+    <button class="mbar-btn ${r.startsWith('#/manifest') ? 'active' : ''}" data-nav="#/manifest">
+      <span class="mbar-icon">📋</span>
+      <span class="mbar-text">Manifest</span>
+    </button>
+    <button class="mbar-btn ${r.startsWith('#/search') ? 'active' : ''}" data-nav="#/search">
+      <span class="mbar-icon">🔍</span>
+      <span class="mbar-text">Search</span>
+    </button>
+    <button class="mbar-btn" id="mobileBottomMenuBtn">
+      <span class="mbar-icon">☰</span>
+      <span class="mbar-text">Menu</span>
+    </button>
+  </div>`;
 }
 function attachShell() {
   const navWrap = document.getElementById('navLinksWrap');
@@ -298,6 +322,14 @@ function attachShell() {
 
   if (menuToggle && navWrap) {
     menuToggle.onclick = (e) => {
+      e.stopPropagation();
+      navWrap.classList.toggle('mobile-open');
+    };
+  }
+
+  const bottomMenuBtn = document.getElementById('mobileBottomMenuBtn');
+  if (bottomMenuBtn && navWrap) {
+    bottomMenuBtn.onclick = (e) => {
       e.stopPropagation();
       navWrap.classList.toggle('mobile-open');
     };
@@ -422,10 +454,12 @@ function openTicketModal(booking, trip) {
           <div><b>Booked by:</b> ${esc(booking.booked_by || 'Staff')}</div>
         </div>
 
-        <table style="margin-bottom:14px;">
-          <thead><tr><th>Seat</th><th>Passenger</th><th>Age/Gender</th><th>Contact</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
+        <div class="table-wrap">
+          <table style="margin-bottom:14px;">
+            <thead><tr><th>Seat</th><th>Passenger</th><th>Age/Gender</th><th>Contact</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
 
         <div class="summary-box" style="margin-top:8px;">
           <span>Fare: <b>${fmtMoney(booking.total_amount)}</b> · Paid: <b>${fmtMoney(booking.amount_paid)}</b></span>
@@ -919,9 +953,9 @@ function renderTripList(trips, wrap) {
     <td>${fmtMoney(t.fare)}</td>
     <td><button class="btn btn-primary" data-select="${t.id}">Select</button></td>
   </tr>`).join('');
-  wrap.innerHTML = `<div class="panel"><h3>Available Trips</h3><table>
+  wrap.innerHTML = `<div class="panel"><h3>Available Trips</h3><div class="table-wrap"><table>
     <thead><tr><th>Departure</th><th>Bus</th><th>Available</th><th>Fare / seat</th><th>Actions</th></tr></thead>
-    <tbody>${rows}</tbody></table></div>`;
+    <tbody>${rows}</tbody></table></div></div>`;
   wrap.querySelectorAll('[data-select]').forEach((b) => b.onclick = async () => {
     const tripId = b.getAttribute('data-select');
     b.disabled = true; b.innerHTML = '<span class="spin"></span>';
@@ -947,7 +981,7 @@ function seatMapHtml(grid, booked, selected, interactive) {
     if (!interactive) return `<div class="seat seat-avail">${esc(lab)}</div>`;
     return `<div class="seat ${isSel ? 'seat-sel' : 'seat-avail'}" data-seat="${esc(lab)}">${esc(lab)}</div>`;
   }).join('')).join('');
-  return `<div class="seatmap" style="grid-template-columns:repeat(${width},44px)">${cells}</div>`;
+  return `<div class="seatmap-wrap"><div class="seatmap" style="grid-template-columns:repeat(${width},44px)">${cells}</div></div>`;
 }
 
 function bookingStep2() {
@@ -1208,7 +1242,7 @@ function showConfirmModal(data, seats) {
     <p style="font-size:13.5px;color:var(--ink-soft);margin:0 0 4px;">Trip: ${esc(trip.route_name)}, ${fmtDate(trip.date)}, ${esc(trip.time)}</p>
     <p style="font-size:13.5px;color:var(--ink-soft);margin:0 0 4px;">Booked by: ${esc(state.user.name)} (${esc(state.user.role)})</p>
     <p style="font-size:13.5px;color:var(--ink-soft);margin:0 0 14px;">Total: ${fmtMoney(data.totalAmount)} · Paid now: ${fmtMoney(data.amountPaid)} · Balance: ${fmtMoney(Math.max(0, data.totalAmount - data.amountPaid))} · ${esc(data.paidStatus)}</p>
-    <table><thead><tr><th>Seat</th><th>Name</th><th>Age</th><th>Gender</th><th>Phone</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="table-wrap"><table><thead><tr><th>Seat</th><th>Name</th><th>Age</th><th>Gender</th><th>Phone</th></tr></thead><tbody>${rows}</tbody></table></div>
     <div style="margin-top:18px;display:flex;justify-content:flex-end;gap:8px;">
       <button class="btn btn-secondary" id="modalTicketBtn">Print Boarding Pass</button>
       <button class="btn btn-primary" id="modalOk">Done</button>
