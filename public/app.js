@@ -11,7 +11,7 @@ async function api(path, opts = {}) {
   if (token) headers['Authorization'] = 'Bearer ' + token;
   const res = await fetch(API_BASE + '/api' + path, { ...opts, headers });
   let data = null;
-  try { data = await res.json(); } catch {}
+  try { data = await res.json(); } catch { }
   if (res.status === 401) { clearToken(); state.user = null; nav('#/login'); }
   if (!res.ok) {
     const err = new Error((data && data.error) || 'Something went wrong.');
@@ -592,8 +592,8 @@ function dashboardView() {
           <td>
             <button class="btn btn-secondary btn-sm" data-quick-ticket="${b.id}">Ticket</button>
             ${(canManage() || roleIs('Supervisor') || b.booked_by_username === state.user.username)
-              ? `<button class="btn btn-danger btn-sm" data-quick-cancel="${b.id}" data-pnr="${esc(b.pnr)}">Cancel</button>`
-              : ''}
+          ? `<button class="btn btn-danger btn-sm" data-quick-cancel="${b.id}" data-pnr="${esc(b.pnr)}">Cancel</button>`
+          : ''}
           </td>
         </tr>
       `;
@@ -788,8 +788,8 @@ function searchView() {
             <td>${esc(s.contact || b.group_contact || '—')}</td>
             <td>
               ${seats.length > 1 && (canManage() || roleIs('Supervisor') || b.booked_by_username === state.user.username)
-                ? `<button class="btn btn-danger btn-sm" data-cancel-seat="${b.id}|${esc(s.seat_label)}">Release</button>`
-                : ''}
+            ? `<button class="btn btn-danger btn-sm" data-cancel-seat="${b.id}|${esc(s.seat_label)}">Release</button>`
+            : ''}
             </td>
           </tr>
         `).join('');
@@ -806,8 +806,8 @@ function searchView() {
                 ${paidPill(b.paid_status)}
                 <button class="btn btn-secondary btn-sm" data-view-ticket="${b.id}">Print Pass</button>
                 ${(canManage() || roleIs('Supervisor') || b.booked_by_username === state.user.username)
-                  ? `<button class="btn btn-danger btn-sm" data-cancel-b="${b.id}" data-pnr="${esc(b.pnr)}">Cancel Booking</button>`
-                  : ''}
+            ? `<button class="btn btn-danger btn-sm" data-cancel-b="${b.id}" data-pnr="${esc(b.pnr)}">Cancel Booking</button>`
+            : ''}
               </div>
             </div>
             <div style="font-size:13px;color:var(--ink-soft);margin-bottom:8px;">
@@ -1014,8 +1014,8 @@ function bookingStep2() {
               </select>
             </div>
           </div>` : bookingCtx.selected.map((lab) => {
-            const p = bookingCtx.pax[lab] || {};
-            return `<div class="pax-card nested"><h4>Seat ${esc(lab)}</h4>
+      const p = bookingCtx.pax[lab] || {};
+      return `<div class="pax-card nested"><h4>Seat ${esc(lab)}</h4>
               <div class="field"><label>Passenger Name</label><input data-pax="${esc(lab)}|name" value="${esc(p.name || '')}"></div>
               <div class="formrow" style="margin-bottom:0;">
                 <div class="field"><label>Age</label><input data-pax="${esc(lab)}|age" type="number" value="${esc(p.age || '')}"></div>
@@ -1028,7 +1028,7 @@ function bookingStep2() {
                   </select>
                 </div>
               </div></div>`;
-          }).join('')}
+    }).join('')}
       </div>`;
   } else {
     paxHtml = bookingCtx.selected.map((lab) => {
@@ -1328,7 +1328,7 @@ function renderManifestBody({ trip, seatData, bookings }) {
         <td>${paidPill(b.paid_status)}${canMarkPaid() ? `
           <div class="no-print" style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap;">
             <button class="btn btn-secondary btn-sm" data-pay="${b.id}" data-amt="0">Unpaid</button>
-            <button class="btn btn-secondary btn-sm" data-pay="${b.id}" data-amt="${Math.round(Number(b.total_amount)/2)}">Half</button>
+            <button class="btn btn-secondary btn-sm" data-pay="${b.id}" data-amt="${Math.round(Number(b.total_amount) / 2)}">Half</button>
             <button class="btn btn-secondary btn-sm" data-pay="${b.id}" data-amt="${b.total_amount}">Full</button>
           </div>` : ''}</td>
         <td>${new Date(b.created_at).toLocaleString('en-IN')}</td>
@@ -1336,11 +1336,11 @@ function renderManifestBody({ trip, seatData, bookings }) {
           <div style="display:flex;gap:4px;flex-wrap:wrap;">
             <button class="btn btn-secondary btn-sm" data-manifest-ticket="${b.id}" title="Print Boarding Pass">Pass</button>
             ${b.seats.length > 1 && canCancelThis
-              ? `<button class="btn btn-danger btn-sm" data-manifest-cancel-seat="${b.id}|${esc(s.seat_label)}" title="Cancel this seat only">Seat</button>`
-              : ''}
+          ? `<button class="btn btn-danger btn-sm" data-manifest-cancel-seat="${b.id}|${esc(s.seat_label)}" title="Cancel this seat only">Seat</button>`
+          : ''}
             ${canCancelThis
-              ? `<button class="btn btn-danger btn-sm" data-manifest-cancel="${b.id}" data-pnr="${esc(b.pnr)}" title="Cancel entire booking">Cancel</button>`
-              : ''}
+          ? `<button class="btn btn-danger btn-sm" data-manifest-cancel="${b.id}" data-pnr="${esc(b.pnr)}" title="Cancel entire booking">Cancel</button>`
+          : ''}
           </div>
         </td>
       </tr>`;
@@ -2211,8 +2211,8 @@ function adminTripsPanel() {
         ${t.status === 'Planned' ? `<button class="btn btn-secondary btn-sm" data-trip-status="${t.id}|In-Transit" title="Start trip">Start</button> ` : ''}
         ${t.status === 'In-Transit' ? `<button class="btn btn-secondary btn-sm" data-trip-status="${t.id}|Completed" title="Mark trip completed">Complete</button> ` : ''}
         ${(t.status === 'Planned' || t.status === 'In-Transit')
-          ? `<button class="btn btn-danger btn-sm" data-cancel-trip="${t.id}">Cancel</button> `
-          : ''}
+      ? `<button class="btn btn-danger btn-sm" data-cancel-trip="${t.id}">Cancel</button> `
+      : ''}
         <button class="btn btn-danger btn-sm" data-del-trip="${t.id}">Delete</button>
       </td>
     </tr>`).join('') || `<tr><td colspan="7" class="empty">No trips for this date.</td></tr>`;
