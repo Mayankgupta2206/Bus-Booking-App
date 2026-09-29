@@ -118,6 +118,17 @@ CREATE TABLE IF NOT EXISTS cancelled_bookings (
   amount_paid REAL DEFAULT 0,
   total_amount REAL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  action TEXT NOT NULL,
+  entity_type TEXT NOT NULL,
+  entity_id TEXT,
+  details TEXT,
+  performed_by TEXT NOT NULL,
+  role TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `);
 
 function ensureColumn(table, column, defSql) {
@@ -128,6 +139,7 @@ function ensureColumn(table, column, defSql) {
 }
 
 ensureColumn('routes', 'fare', 'REAL NOT NULL DEFAULT 0');
+ensureColumn('routes', 'pickup_points', 'TEXT');
 ensureColumn('buses', 'layout_json', 'TEXT');
 ensureColumn('bookings', 'booked_by_username', 'TEXT');
 ensureColumn('bookings', 'booked_by_role', 'TEXT');
@@ -137,6 +149,27 @@ ensureColumn('bookings', 'fare_per_seat', 'REAL NOT NULL DEFAULT 0');
 ensureColumn('bookings', 'total_amount', 'REAL NOT NULL DEFAULT 0');
 ensureColumn('bookings', 'paid_status', "TEXT NOT NULL DEFAULT 'Unpaid'");
 ensureColumn('bookings', 'amount_paid', 'REAL NOT NULL DEFAULT 0');
+ensureColumn('bookings', 'pickup_point', 'TEXT');
+ensureColumn('booking_seats', 'boarded', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('booking_seats', 'boarded_at', 'TEXT');
+ensureColumn('booking_seats', 'boarded_by', 'TEXT');
+
+function logAudit(action, entityType, entityId, details, performedBy, role) {
+  try {
+    db.prepare('INSERT INTO audit_logs (action, entity_type, entity_id, details, performed_by, role) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(
+        String(action || ''),
+        String(entityType || ''),
+        String(entityId || ''),
+        typeof details === 'object' ? JSON.stringify(details) : String(details || ''),
+        String(performedBy || 'System'),
+        String(role || 'System')
+      );
+    db.syncCloud();
+  } catch (err) {
+    console.warn('Audit log write notice:', err.message);
+  }
+}
 
 // Allow In-Transit on trip status check
 (function migrateTripStatusCheck() {
@@ -334,5 +367,6 @@ function seedIfEmpty() {
 }
 seedIfEmpty();
 
-db.helpers = { parsePattern, defaultLayout, countSeats, layoutWidth, getBusLayout, serializeLayout, resolvePaidStatus };
+db.logAudit = logAudit;
+db.helpers = { parsePattern, defaultLayout, countSeats, layoutWidth, getBusLayout, serializeLayout, resolvePaidStatus, logAudit };
 module.exports = db;

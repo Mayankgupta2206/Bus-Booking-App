@@ -503,6 +503,103 @@ tbody tr:hover{background:var(--ivory);}
 .pwa-install-btn:hover { background: #B45309; }
 .pwa-close-btn { background: none; border: none; color: #94A3B8; font-size: 18px; cursor: pointer; padding: 0 4px; }
 
+/* WhatsApp Button & Action Enhancements */
+.btn-whatsapp {
+  background: #25D366 !important;
+  color: #FFFFFF !important;
+  border: 1px solid #1EBE5D !important;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  box-shadow: 0 1px 3px rgba(37, 211, 102, 0.25);
+}
+.btn-whatsapp:hover, .btn-whatsapp:active {
+  background: #1EBE5D !important;
+}
+
+/* Ticket QR Box */
+.ticket-qr-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--line);
+  gap: 12px;
+}
+.ticket-qr-box {
+  background: #FFFFFF;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ticket-qr-box img, .ticket-qr-box canvas {
+  display: block;
+}
+
+/* Spot Payment & UPI QR Modal */
+.spot-pay-card {
+  background: var(--ivory);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+  margin-bottom: 16px;
+}
+.upi-qr-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: #FFFFFF;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+  margin: 14px 0;
+  text-align: center;
+}
+.upi-qr-img {
+  padding: 8px;
+  background: #FFFFFF;
+  border: 1px solid #CBD5E1;
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+
+/* Manifest Boarding Progress Bar */
+.boarding-progress-bar {
+  width: 100%;
+  background: #E2E8F0;
+  height: 8px;
+  border-radius: 4px;
+  margin: 8px 0 14px;
+  overflow: hidden;
+}
+.boarding-progress-fill {
+  background: var(--ok);
+  height: 100%;
+  transition: width 0.3s ease;
+}
+
+/* Audit Logs Table */
+.audit-badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  font-family: 'IBM Plex Mono', monospace;
+  text-transform: uppercase;
+}
+.audit-created { background: #ECFDF5; color: #047857; border: 1px solid #A7F3D0; }
+.audit-cancelled { background: #FEF2F2; color: #B91C1C; border: 1px solid #FECACA; }
+.audit-boarded { background: #EFF6FF; color: #1D4ED8; border: 1px solid #BFDBFE; }
+.audit-payment { background: #FFFBEB; color: #B45309; border: 1px solid #FDE68A; }
+.audit-updated { background: #F3E8FF; color: #6B21A8; border: 1px solid #E9D5FF; }
+
 @media print {
   .no-print, .topnav, .toastwrap, .usermenu, .mode-toggle, .tabbar, .tooltip, .actions-row, button.btn { display: none !important; }
   body { background: #fff !important; color: #000 !important; font-size: 12px; }

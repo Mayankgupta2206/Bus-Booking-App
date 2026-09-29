@@ -179,9 +179,31 @@ function resolvePaidStatus(amountPaid, totalAmount) {
 let searchCtx = { q: '', results: null, loading: false };
 let dashboardCtx = { stats: null, loaded: false, loading: false };
 
+/* ---------- Inactivity Auto-Logout (15 Minutes) ---------- */
+const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
+let inactivityTimer = null;
+
+function resetInactivityTimer() {
+  if (inactivityTimer) clearTimeout(inactivityTimer);
+  if (!state.user) return;
+  inactivityTimer = setTimeout(() => {
+    if (state.user) {
+      logout();
+      alert('You have been automatically logged out due to 15 minutes of inactivity for security.');
+    }
+  }, INACTIVITY_TIMEOUT_MS);
+}
+
+['mousedown', 'mousemove', 'keydown', 'scroll', 'touchstart', 'click'].forEach((evt) => {
+  window.addEventListener(evt, resetInactivityTimer, { passive: true });
+});
+
 function nav(path, pushHash = true) {
   if (path.startsWith('#/booking') && !canBook()) { toast('Your role cannot create bookings'); path = '#/dashboard'; }
-  if (path.startsWith('#/admin') && !canManage()) { toast('Admin access required'); path = '#/dashboard'; }
+  if (path.startsWith('#/admin') && !canManage() && !(path === '#/admin/audit-logs' && roleIs('Supervisor'))) {
+    toast('Admin access required');
+    path = '#/dashboard';
+  }
   state.route = path;
   if (pushHash && window.location.hash !== path) {
     window.location.hash = path;
@@ -189,7 +211,16 @@ function nav(path, pushHash = true) {
   render();
   window.scrollTo(0, 0);
 }
-function logout() { clearToken(); state.user = null; Cache = { routes: [], buses: [] }; usersCache = []; adminCtx.usersLoaded = false; dashboardCtx.loaded = false; nav('#/login'); }
+function logout() {
+  if (inactivityTimer) { clearTimeout(inactivityTimer); inactivityTimer = null; }
+  clearToken();
+  state.user = null;
+  Cache = { routes: [], buses: [] };
+  usersCache = [];
+  adminCtx.usersLoaded = false;
+  dashboardCtx.loaded = false;
+  nav('#/login');
+}
 
 async function loadCaches() {
   const [routes, buses] = await Promise.all([api('/routes'), api('/buses')]);
@@ -229,6 +260,7 @@ function attachLogin() {
       const data = await api('/auth/login', { method: 'POST', body: JSON.stringify({ username: u, password: p }) });
       setToken(data.token);
       state.user = data.user;
+      resetInactivityTimer();
       await loadCaches();
       nav('#/dashboard');
       setTimeout(() => toast(`Welcome back, ${data.user.name}`), 200);
@@ -274,6 +306,7 @@ function renderShell() {
       ${canManage() ? linkBtn('#/admin/buses', 'Buses & Layouts') : ''}
       ${canManage() ? linkBtn('#/admin/routes-trips', 'Routes & Trips') : ''}
       ${canManage() ? linkBtn('#/admin/users', 'Users') : ''}
+      ${(canManage() || roleIs('Supervisor')) ? linkBtn('#/admin/audit-logs', 'Activity Logs') : ''}
       <button type="button" class="navlink mobile-only-item" id="pwaMobileInstallBtn">📲 Install Mobile App</button>
       <button type="button" class="navlink mobile-only-item" id="mobileLogoutBtn" style="color:#DC2626;">🚪 Logout</button>
 
@@ -401,6 +434,7 @@ function routeContent() {
   if (r === '#/admin/buses' && canManage()) return adminBusesView();
   if (r === '#/admin/routes-trips' && canManage()) return adminRoutesTripsView();
   if (r === '#/admin/users' && canManage()) return adminUsersView();
+  if (r === '#/admin/audit-logs' && (canManage() || roleIs('Supervisor'))) return auditLogsView();
   return dashboardView();
 }
 function attachRoute() {
@@ -412,9 +446,43 @@ function attachRoute() {
   else if (r === '#/admin/buses' && canManage()) attachAdminBuses();
   else if (r === '#/admin/routes-trips' && canManage()) attachAdminRoutesTrips();
   else if (r === '#/admin/users' && canManage()) attachAdminUsers();
+  else if (r === '#/admin/audit-logs' && (canManage() || roleIs('Supervisor'))) attachAuditLogs();
 }
 
-/* ---------- Ticket Modal & Helpers ---------- */
+/* ---------- Ticket Modal & WhatsApp Sharing ---------- */
+function shareTicketWhatsapp(booking, trip) {
+  const pnr = booking.pnr || '';
+  const route = trip?.route_name || booking.route_name || 'Seva Bus';
+  const date = fmtDate(trip?.date || booking.trip_date);
+  const time = trip?.time || booking.trip_time || '';
+  const bus = trip?.bus_name || booking.bus_name || 'Seva Bus';
+  const seats = (booking.seats || []).map((s) => s.seat_label).join(', ');
+  const passengerNames = (booking.seats || []).map((s) => `${s.passenger_name || 'Passenger'} (${s.seat_label})`).join(', ');
+  const total = fmtMoney(booking.total_amount);
+  const paid = fmtMoney(booking.amount_paid);
+  const status = booking.paid_status || 'Unpaid';
+  const due = Math.max(0, Number(booking.total_amount || 0) - Number(booking.amount_paid || 0));
+  const pickup = booking.pickup_point ? `\n📍 *Pickup Stop:* ${booking.pickup_point}` : '';
+
+  const text = 
+`🎫 *SEVA BUS BOOKING PASS*
+*PNR:* ${pnr}
+🛣️ *Route:* ${route}
+📅 *Date & Time:* ${date} at ${time}
+🚌 *Bus:* ${bus}${pickup}
+💺 *Seat(s):* ${seats}
+👤 *Passenger(s):* ${passengerNames}
+💰 *Fare:* ${total} · Paid: ${paid} (${status})${due > 0 ? ` · *Due at Boarding:* ₹${due.toFixed(2)}` : ''}
+
+Have a safe and comfortable journey with Seva Bus!`;
+
+  const rawPhone = (booking.seats && booking.seats[0] && booking.seats[0].contact) || booking.group_contact || '';
+  const digits = String(rawPhone).replace(/\D/g, '');
+  const phoneParam = digits.length >= 10 ? (digits.length === 10 ? '91' + digits : digits) : '';
+  const url = phoneParam ? `https://wa.me/${phoneParam}?text=${encodeURIComponent(text)}` : `https://wa.me/?text=${encodeURIComponent(text)}`;
+  window.open(url, '_blank');
+}
+
 function openTicketModal(booking, trip) {
   closeModal();
   const seats = booking.seats || [];
@@ -450,6 +518,7 @@ function openTicketModal(booking, trip) {
           <div><b>Departure:</b> ${esc(trip.time || trip.trip_time)}</div>
           <div><b>Seats (${seats.length}):</b> <span style="font-family:'IBM Plex Mono',monospace;font-weight:600;color:var(--maroon);">${esc(seatListStr)}</span></div>
           <div><b>Booked by:</b> ${esc(booking.booked_by || 'Staff')}</div>
+          ${booking.pickup_point ? `<div style="grid-column:span 2;"><b>Pickup Stop:</b> 📍 ${esc(booking.pickup_point)}</div>` : ''}
         </div>
 
         <div class="table-wrap">
@@ -463,15 +532,42 @@ function openTicketModal(booking, trip) {
           <span>Fare: <b>${fmtMoney(booking.total_amount)}</b> · Paid: <b>${fmtMoney(booking.amount_paid)}</b></span>
           <span>Balance Due: <b style="color:${bal > 0 ? 'var(--err)' : 'var(--ok)'};">${fmtMoney(bal)}</b></span>
         </div>
+
+        <div class="ticket-qr-wrap">
+          <div id="ticketQrArea" class="ticket-qr-box"></div>
+          <div style="font-size:11px;color:var(--ink-soft);text-align:right;">
+            Scan to verify Boarding Pass<br>
+            <b style="color:var(--ink);font-family:'IBM Plex Mono',monospace;">PNR: ${esc(booking.pnr)}</b><br>
+            <span>${seats.length} Seat(s) · Status: <b>${esc(booking.paid_status)}</b></span>
+          </div>
+        </div>
       </div>
 
-      <div class="actions-row no-print" style="justify-content:flex-end;margin-top:18px;">
+      <div class="actions-row no-print" style="justify-content:flex-end;margin-top:18px;gap:8px;">
+        <button class="btn btn-whatsapp" id="ticketShareWaBtn" title="Share via WhatsApp">💬 Share WhatsApp</button>
         <button class="btn btn-secondary" id="ticketCloseBtn">Close</button>
         <button class="btn btn-primary" id="ticketPrintBtn">Print Boarding Pass</button>
       </div>
     </div>
   `;
   document.body.appendChild(div);
+
+  if (window.QRCode && document.getElementById('ticketQrArea')) {
+    try {
+      new QRCode(document.getElementById('ticketQrArea'), {
+        text: `SEVA-BUS|PNR:${booking.pnr}|SEATS:${seatListStr}|FARE:${booking.total_amount}|STATUS:${booking.paid_status}`,
+        width: 80,
+        height: 80,
+        colorDark: '#1E293B',
+        colorLight: '#FFFFFF',
+        correctLevel: QRCode.CorrectLevel.M
+      });
+    } catch (e) { console.warn('QR render error:', e); }
+  }
+
+  const waBtn = document.getElementById('ticketShareWaBtn');
+  if (waBtn) waBtn.onclick = () => shareTicketWhatsapp(booking, trip);
+
   document.getElementById('ticketCloseBtn').onclick = () => div.remove();
   document.getElementById('ticketPrintBtn').onclick = () => window.print();
 }
@@ -500,7 +596,7 @@ async function cancelSeatPrompt(bookingId, seatLabel, onComplete) {
 
 function downloadManifestCsv(trip, bookings) {
   const rows = [];
-  rows.push(['Sr', 'Seat', 'Passenger Name', 'Age', 'Gender', 'Phone', 'PNR', 'Total Fare', 'Amount Paid', 'Balance Due', 'Payment Status', 'Booked By', 'Role', 'Booking Time']);
+  rows.push(['Sr', 'Seat', 'Passenger Name', 'Age', 'Gender', 'Phone', 'Pickup Stop', 'PNR', 'Total Fare', 'Amount Paid', 'Balance Due', 'Payment Status', 'Boarded', 'Booked By', 'Role', 'Booking Time']);
 
   let sr = 1;
   bookings.forEach((b) => {
@@ -514,11 +610,13 @@ function downloadManifestCsv(trip, bookings) {
         s.age,
         s.gender,
         s.contact || b.group_contact || '',
+        b.pickup_point || 'Standard',
         b.pnr,
         Number(b.total_amount || 0).toFixed(2),
         Number(b.amount_paid || 0).toFixed(2),
         bal.toFixed(2),
         b.paid_status,
+        s.boarded ? 'Yes' : 'No',
         b.booked_by,
         b.booked_by_role || '',
         new Date(b.created_at).toLocaleString('en-IN'),
@@ -1051,6 +1149,17 @@ function bookingStep2() {
     }).join('');
   }
 
+  const routeObj = Cache.routes.find((r) => r.id === trip.route_id);
+  let pickupStops = [];
+  if (routeObj && routeObj.pickup_points) {
+    try {
+      const parsed = JSON.parse(routeObj.pickup_points);
+      pickupStops = Array.isArray(parsed) ? parsed : [routeObj.pickup_points];
+    } catch {
+      pickupStops = String(routeObj.pickup_points).split(',').map((s) => s.trim()).filter(Boolean);
+    }
+  }
+
   return `
   <h1 class="page-title">Create Booking – ${esc(trip.route_name)}, ${fmtDate(trip.date)}, ${esc(trip.time)}</h1>
   <div id="bookingErr" class="banner banner-err hidden"></div>
@@ -1071,6 +1180,14 @@ function bookingStep2() {
     <div class="panel">
       <h3>Passenger Details</h3>
       ${paxHtml}
+      ${pickupStops.length > 0 ? `
+        <div class="field" style="margin-top:14px;">
+          <label for="bookingPickup">Boarding / Pick-up Stop</label>
+          <select id="bookingPickup">
+            <option value="">Main Origin (${esc(trip.source || 'Standard')})</option>
+            ${pickupStops.map((s) => `<option value="${esc(s)}" ${bookingCtx.pickupPoint === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
+          </select>
+        </div>` : ''}
       ${bookingCtx.selected.length ? `
         <div class="pay-box">
           <h4>Payment</h4>
@@ -1126,6 +1243,8 @@ function attachBookingStep2() {
   if (la) la.oninput = () => { bookingCtx.lead.age = la.value; };
   const lg = document.getElementById('leadGender');
   if (lg) lg.onchange = () => { bookingCtx.lead.gender = lg.value; };
+  const bp = document.getElementById('bookingPickup');
+  if (bp) bp.onchange = (e) => { bookingCtx.pickupPoint = e.target.value; };
   const ps = document.getElementById('advancePaid');
   const syncPay = () => {
     const fare = Number(bookingCtx.trip.fare) || 0;
@@ -1212,6 +1331,7 @@ async function confirmBooking() {
         isGroup: bookingCtx.mode === 'group',
         groupContact: bookingCtx.groupContact,
         amountPaid,
+        pickupPoint: bookingCtx.pickupPoint || null,
       }),
     });
     showConfirmModal(data, seats);
@@ -1239,29 +1359,37 @@ function showConfirmModal(data, seats) {
     <p style="margin:6px 0 14px;font-size:13.5px;">PNR <span class="pnr">${esc(data.pnr)}</span></p>
     <p style="font-size:13.5px;color:var(--ink-soft);margin:0 0 4px;">Trip: ${esc(trip.route_name)}, ${fmtDate(trip.date)}, ${esc(trip.time)}</p>
     <p style="font-size:13.5px;color:var(--ink-soft);margin:0 0 4px;">Booked by: ${esc(state.user.name)} (${esc(state.user.role)})</p>
+    ${data.pickupPoint ? `<p style="font-size:13.5px;color:var(--ink-soft);margin:0 0 4px;">Pickup Stop: 📍 <b>${esc(data.pickupPoint)}</b></p>` : ''}
     <p style="font-size:13.5px;color:var(--ink-soft);margin:0 0 14px;">Total: ${fmtMoney(data.totalAmount)} · Paid now: ${fmtMoney(data.amountPaid)} · Balance: ${fmtMoney(Math.max(0, data.totalAmount - data.amountPaid))} · ${esc(data.paidStatus)}</p>
     <div class="table-wrap"><table><thead><tr><th>Seat</th><th>Name</th><th>Age</th><th>Gender</th><th>Phone</th></tr></thead><tbody>${rows}</tbody></table></div>
-    <div style="margin-top:18px;display:flex;justify-content:flex-end;gap:8px;">
+    <div style="margin-top:18px;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;">
+      <button class="btn btn-whatsapp" id="modalShareWaBtn">💬 Share WhatsApp</button>
       <button class="btn btn-secondary" id="modalTicketBtn">Print Boarding Pass</button>
       <button class="btn btn-primary" id="modalOk">Done</button>
     </div>
   </div>`;
   document.body.appendChild(div);
 
+  const confirmObj = {
+    pnr: data.pnr,
+    total_amount: data.totalAmount,
+    amount_paid: data.amountPaid,
+    paid_status: data.paidStatus,
+    booked_by: state.user.name,
+    pickup_point: data.pickupPoint,
+    seats: seats.map((s) => ({ seat_label: s.label, passenger_name: s.name, age: s.age, gender: s.gender, contact: s.contact })),
+  };
+
+  const waBtn = document.getElementById('modalShareWaBtn');
+  if (waBtn) waBtn.onclick = () => shareTicketWhatsapp(confirmObj, trip);
+
   document.getElementById('modalTicketBtn').onclick = () => {
-    openTicketModal({
-      pnr: data.pnr,
-      total_amount: data.totalAmount,
-      amount_paid: data.amountPaid,
-      paid_status: data.paidStatus,
-      booked_by: state.user.name,
-      seats: seats.map((s) => ({ seat_label: s.label, passenger_name: s.name, age: s.age, gender: s.gender, contact: s.contact })),
-    }, trip);
+    openTicketModal(confirmObj, trip);
   };
 
   document.getElementById('modalOk').onclick = () => {
     div.remove();
-    bookingCtx = { step: 1, tripId: null, selected: [], pax: {}, mode: 'individual', groupContact: '', applyAll: true, lead: { name: '', age: '', gender: '' }, advancePaid: '' };
+    bookingCtx = { step: 1, tripId: null, selected: [], pax: {}, mode: 'individual', groupContact: '', applyAll: true, lead: { name: '', age: '', gender: '' }, advancePaid: '', pickupPoint: '' };
     dashboardCtx.loaded = false;
     nav('#/dashboard');
   };
@@ -1302,13 +1430,17 @@ function renderManifestBody({ trip, seatData, bookings }) {
   }
   const agents = [...new Set(bookings.map((b) => b.booked_by_username || b.booked_by).filter(Boolean))];
   const total = seatData.seatCount || countSeats(seatData.grid);
-  const bookedCount = bookings.reduce((n, b) => n + b.seats.length, 0);
+  const totalBookedSeats = bookings.reduce((n, b) => n + b.seats.length, 0);
+  const boardedCount = bookings.reduce((n, b) => n + b.seats.filter((s) => s.boarded).length, 0);
+  const pctBoarded = totalBookedSeats > 0 ? Math.round((boardedCount / totalBookedSeats) * 100) : 0;
   const width = Math.max(...seatData.grid.map((r) => r.length), 1);
+
   const seatCells = seatData.grid.map((row) => row.map((lab) => {
     if (lab == null || lab === '') return `<div class="seat aisle"></div>`;
     const s = seatData.booked[lab];
     if (s) {
-      return `<div class="mseat mseat-booked">${esc(lab)}<div class="tooltip">Seat: ${esc(lab)}<br>Passenger: ${esc(s.passenger_name)}<br>Age: ${esc(s.age)} · ${esc(s.gender)}<br>Phone: ${esc(s.contact || '—')}<br>PNR: ${esc(s.pnr)}<br>Booked by: ${esc(s.booked_by)}${s.booked_by_role ? ' (' + esc(s.booked_by_role) + ')' : ''}<br>${esc(s.paid_status || '')} · paid ${fmtMoney(s.amount_paid || 0)}</div></div>`;
+      const isB = !!s.boarded;
+      return `<div class="mseat mseat-booked ${isB ? 'mseat-boarded' : ''}">${esc(lab)}${isB ? ' ✓' : ''}<div class="tooltip">Seat: ${esc(lab)}<br>Passenger: ${esc(s.passenger_name)}<br>Status: ${isB ? 'Boarded' : 'Not Boarded'}<br>Age: ${esc(s.age)} · ${esc(s.gender)}<br>Phone: ${esc(s.contact || '—')}<br>PNR: ${esc(s.pnr)}<br>Booked by: ${esc(s.booked_by)}${s.booked_by_role ? ' (' + esc(s.booked_by_role) + ')' : ''}<br>${esc(s.paid_status || '')} · paid ${fmtMoney(s.amount_paid || 0)}</div></div>`;
     }
     return `<div class="mseat mseat-avail">${esc(lab)}</div>`;
   }).join('')).join('');
@@ -1320,19 +1452,32 @@ function renderManifestBody({ trip, seatData, bookings }) {
       const bal = Math.max(0, Number(b.total_amount || 0) - Number(b.amount_paid || 0));
       const canCancelThis = canManage() || roleIs('Supervisor') || b.booked_by_username === state.user.username;
       return `<tr>
-        <td>${sr}</td><td>${esc(s.seat_label)}</td><td>${esc(s.passenger_name)}</td><td>${esc(s.age)}</td><td>${esc(s.gender)}</td>
-        <td>${esc(s.contact || '—')}</td><td>${esc(b.pnr)}</td>
-        <td>${fmtMoney(b.total_amount)}<div class="muted">paid ${fmtMoney(b.amount_paid)} · due ${fmtMoney(bal)}</div></td>
-        <td>${paidPill(b.paid_status)}${canMarkPaid() ? `
-          <div class="no-print" style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap;">
-            <button class="btn btn-secondary btn-sm" data-pay="${b.id}" data-amt="0">Unpaid</button>
-            <button class="btn btn-secondary btn-sm" data-pay="${b.id}" data-amt="${Math.round(Number(b.total_amount) / 2)}">Half</button>
-            <button class="btn btn-secondary btn-sm" data-pay="${b.id}" data-amt="${b.total_amount}">Full</button>
-          </div>` : ''}</td>
-        <td>${new Date(b.created_at).toLocaleString('en-IN')}</td>
+        <td>${sr}</td>
+        <td><b>${esc(s.seat_label)}</b></td>
+        <td><b>${esc(s.passenger_name)}</b></td>
+        <td>${esc(s.age || '—')} / ${esc(s.gender || '—')}</td>
+        <td>${esc(s.contact || '—')}</td>
+        <td>${b.pickup_point ? `<span style="display:inline-block;padding:2px 7px;border-radius:4px;font-size:11.5px;font-weight:600;background:#E0F2FE;color:#0369A1;">📍 ${esc(b.pickup_point)}</span>` : '<span class="muted" style="font-size:12px;">Standard</span>'}</td>
+        <td><span class="pnr">${esc(b.pnr)}</span></td>
+        <td>
+          <div><b>${fmtMoney(b.total_amount)}</b></div>
+          <div class="muted" style="font-size:11px;">Paid: ${fmtMoney(b.amount_paid)} · Due: ${fmtMoney(bal)}</div>
+          <div style="margin-top:2px;">${paidPill(b.paid_status)}</div>
+          ${bal > 0 ? `<button class="btn btn-primary btn-sm no-print" style="margin-top:4px;font-size:11px;padding:3px 7px;" data-collect-due="${b.id}" data-due="${bal}" data-pax="${esc(s.passenger_name)}" data-pnr="${esc(b.pnr)}">💳 Collect ₹${bal}</button>` : ''}
+        </td>
+        <td>
+          ${s.boarded ? `
+            <div>
+              <span class="pill pill-ok" style="font-size:11.5px;padding:2px 8px;">✓ Boarded</span>
+              <button class="btn btn-secondary btn-sm no-print" data-unboard-seat="${s.id}" data-pnr="${esc(b.pnr)}" data-seat="${esc(s.seat_label)}" style="padding:1px 5px;font-size:10.5px;margin-left:4px;" title="Undo boarding">Undo</button>
+              ${s.boarded_at ? `<div class="muted" style="font-size:10.5px;margin-top:2px;">${new Date(s.boarded_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}${s.boarded_by ? ' · ' + esc(s.boarded_by) : ''}</div>` : ''}
+            </div>` : `
+            <button class="btn btn-secondary btn-sm no-print" data-board-seat="${s.id}" data-bid="${b.id}" data-due="${bal}" data-pax="${esc(s.passenger_name)}" data-pnr="${esc(b.pnr)}" data-seat="${esc(s.seat_label)}" style="font-weight:600;padding:4px 9px;font-size:11.5px;">Board ➔</button>`}
+        </td>
         <td class="no-print">
           <div style="display:flex;gap:4px;flex-wrap:wrap;">
             <button class="btn btn-secondary btn-sm" data-manifest-ticket="${b.id}" title="Print Boarding Pass">Pass</button>
+            <button class="btn btn-whatsapp btn-sm" data-manifest-wa="${b.id}" title="Share via WhatsApp">💬 WA</button>
             ${b.seats.length > 1 && canCancelThis
           ? `<button class="btn btn-danger btn-sm" data-manifest-cancel-seat="${b.id}|${esc(s.seat_label)}" title="Cancel this seat only">Seat</button>`
           : ''}
@@ -1364,14 +1509,14 @@ function renderManifestBody({ trip, seatData, bookings }) {
       return `<div class="agent-group">
         <div class="agent-group-head"><b>${esc(g.label)}</b><span>${seatN} seat(s) · @${esc(key)}</span></div>
         <div class="table-wrap"><table class="manifest-table">
-          <thead><tr><th>Sr.</th><th>Seat</th><th>Name</th><th>Age</th><th>Gender</th><th>Phone</th><th>PNR</th><th>Amount</th><th>Payment</th><th>Time</th><th class="no-print">Actions</th></tr></thead>
+          <thead><tr><th>Sr.</th><th>Seat</th><th>Name</th><th>Age/Gen</th><th>Phone</th><th>Pickup Stop</th><th>PNR</th><th>Amount & Balance</th><th>Boarding</th><th class="no-print">Actions</th></tr></thead>
           <tbody>${html}</tbody>
         </table></div>
       </div>`;
     }).join('');
   } else {
     listHtml = `<div class="table-wrap"><table class="manifest-table">
-      <thead><tr><th>Sr.</th><th>Seat</th><th>Name</th><th>Age</th><th>Gender</th><th>Phone</th><th>PNR</th><th>Amount</th><th>Payment</th><th>Time</th><th class="no-print">Actions</th></tr></thead>
+      <thead><tr><th>Sr.</th><th>Seat</th><th>Name</th><th>Age/Gen</th><th>Phone</th><th>Pickup Stop</th><th>PNR</th><th>Amount & Balance</th><th>Boarding</th><th class="no-print">Actions</th></tr></thead>
       <tbody>${bookingRowsHtml(list, 0)}</tbody>
     </table></div>`;
   }
@@ -1387,8 +1532,12 @@ function renderManifestBody({ trip, seatData, bookings }) {
     </div>
     <div class="manifest-banner">
       <span><b>${esc(trip.route_name)}</b></span><span>${esc(trip.bus_name)}</span><span>${fmtDate(trip.date)}, ${esc(trip.time)}</span>
-      <span>Total Seats: ${total}</span><span>Booked: ${bookedCount}</span><span>Available: ${total - bookedCount}</span>
+      <span>Total Seats: ${total}</span><span>Booked: ${totalBookedSeats}</span><span>Available: ${total - totalBookedSeats}</span>
+      <span>Boarded: <b>${boardedCount} / ${totalBookedSeats}</b> (${pctBoarded}%)</span>
       <span>Collected: ${fmtMoney(collected)}</span><span>Due: ${fmtMoney(due)}</span>
+    </div>
+    <div class="boarding-progress-bar no-print">
+      <div class="boarding-progress-fill" style="width:${pctBoarded}%"></div>
     </div>
     <div class="formrow no-print" style="margin-bottom:14px;">
       <div class="field"><label>Filter by booked-by</label>
@@ -1460,6 +1609,75 @@ async function attachManifest() {
     exportBtn.onclick = () => downloadManifestCsv(manifestCtx.data.trip, manifestCtx.data.bookings);
   }
 
+  const reloadManifest = async () => {
+    try {
+      const [trip, seatData, bookings] = await Promise.all([
+        api('/trips/' + manifestCtx.tripId),
+        api('/trips/' + manifestCtx.tripId + '/seats'),
+        api('/bookings?tripId=' + manifestCtx.tripId),
+      ]);
+      manifestCtx.data = { trip, seatData, bookings };
+      dashboardCtx.loaded = false;
+      nav('#/manifest');
+    } catch (err) { toast('Error updating manifest: ' + err.message); }
+  };
+
+  document.querySelectorAll('[data-board-seat]').forEach((btn) => {
+    btn.onclick = async () => {
+      const seatId = btn.getAttribute('data-board-seat');
+      const bId = btn.getAttribute('data-bid');
+      const due = Number(btn.getAttribute('data-due')) || 0;
+      const pax = btn.getAttribute('data-pax');
+      const seat = btn.getAttribute('data-seat');
+
+      const booking = (manifestCtx.data.bookings || []).find((x) => String(x.id) === String(bId));
+
+      if (due > 0 && booking) {
+        promptBoardWithDue(booking, manifestCtx.data.trip, seatId, seat, due, pax, reloadManifest);
+      } else {
+        btn.disabled = true;
+        try {
+          await api('/manifest/board', { method: 'POST', body: JSON.stringify({ seatId, boarded: 1 }) });
+          toast(`Seat ${seat} marked boarded`);
+          await reloadManifest();
+        } catch (e) { toast(e.message); btn.disabled = false; }
+      }
+    };
+  });
+
+  document.querySelectorAll('[data-unboard-seat]').forEach((btn) => {
+    btn.onclick = async () => {
+      const seatId = btn.getAttribute('data-unboard-seat');
+      const seat = btn.getAttribute('data-seat');
+      btn.disabled = true;
+      try {
+        await api('/manifest/board', { method: 'POST', body: JSON.stringify({ seatId, boarded: 0 }) });
+        toast(`Seat ${seat} boarding unmarked`);
+        await reloadManifest();
+      } catch (e) { toast(e.message); btn.disabled = false; }
+    };
+  });
+
+  document.querySelectorAll('[data-collect-due]').forEach((btn) => {
+    btn.onclick = () => {
+      const bId = btn.getAttribute('data-collect-due');
+      const due = Number(btn.getAttribute('data-due')) || 0;
+      const pax = btn.getAttribute('data-pax');
+      const booking = (manifestCtx.data.bookings || []).find((x) => String(x.id) === String(bId));
+      if (booking) {
+        openSpotPaymentModal(booking, manifestCtx.data.trip, due, pax, reloadManifest);
+      }
+    };
+  });
+
+  document.querySelectorAll('[data-manifest-wa]').forEach((btn) => {
+    btn.onclick = () => {
+      const bId = btn.getAttribute('data-manifest-wa');
+      const booking = (manifestCtx.data.bookings || []).find((x) => String(x.id) === String(bId));
+      if (booking) shareTicketWhatsapp(booking, manifestCtx.data.trip);
+    };
+  });
+
   document.querySelectorAll('[data-manifest-ticket]').forEach((btn) => {
     btn.onclick = () => {
       const bId = btn.getAttribute('data-manifest-ticket');
@@ -1473,14 +1691,7 @@ async function attachManifest() {
       const bId = btn.getAttribute('data-manifest-cancel');
       const pnr = btn.getAttribute('data-pnr');
       cancelBookingPrompt(bId, pnr, async () => {
-        const [trip, seatData, bookings] = await Promise.all([
-          api('/trips/' + manifestCtx.tripId),
-          api('/trips/' + manifestCtx.tripId + '/seats'),
-          api('/bookings?tripId=' + manifestCtx.tripId),
-        ]);
-        manifestCtx.data = { trip, seatData, bookings };
-        dashboardCtx.loaded = false;
-        render();
+        await reloadManifest();
       });
     };
   });
@@ -1489,32 +1700,360 @@ async function attachManifest() {
     btn.onclick = () => {
       const [bId, seatLabel] = btn.getAttribute('data-manifest-cancel-seat').split('|');
       cancelSeatPrompt(bId, seatLabel, async () => {
-        const [trip, seatData, bookings] = await Promise.all([
-          api('/trips/' + manifestCtx.tripId),
-          api('/trips/' + manifestCtx.tripId + '/seats'),
-          api('/bookings?tripId=' + manifestCtx.tripId),
-        ]);
-        manifestCtx.data = { trip, seatData, bookings };
-        dashboardCtx.loaded = false;
-        render();
+        await reloadManifest();
       });
     };
   });
+}
 
-  document.querySelectorAll('[data-pay]').forEach((btn) => {
-    btn.onclick = async () => {
-      const id = btn.getAttribute('data-pay');
-      const amountPaid = Number(btn.getAttribute('data-amt'));
-      try {
-        await api('/bookings/' + id + '/payment', { method: 'PATCH', body: JSON.stringify({ amountPaid }) });
-        toast('Payment updated');
-        const bookings = await api('/bookings?tripId=' + manifestCtx.tripId);
-        manifestCtx.data.bookings = bookings;
-        dashboardCtx.loaded = false;
-        nav('#/manifest');
-      } catch (err) { toast(err.message); }
+function promptBoardWithDue(booking, trip, seatId, seatLabel, due, paxName, reloadManifest) {
+  closeModal();
+  const div = document.createElement('div');
+  div.className = 'modal-backdrop';
+  div.innerHTML = `
+    <div class="modal modal-form" style="max-width:420px;">
+      <h2 style="margin-top:0;">⚠️ Balance Pending</h2>
+      <p style="font-size:13.5px;color:var(--ink);line-height:1.5;">
+        Passenger <b>${esc(paxName)}</b> (Seat <b>${esc(seatLabel)}</b>, PNR <span class="pnr">${esc(booking.pnr)}</span>) has an outstanding balance of <b>${fmtMoney(due)}</b>.
+      </p>
+      <div style="background:#FFFBEB;border:1px solid #FDE68A;padding:10px 12px;border-radius:6px;font-size:12.5px;color:#92400E;margin:12px 0 16px;">
+        💡 You can collect the payment right now (via Cash, UPI QR, or Card) and board automatically, or proceed with boarding only.
+      </div>
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        <button class="btn btn-primary" id="promptCollectBtn" style="justify-content:center;">💳 Collect ${fmtMoney(due)} & Board</button>
+        <button class="btn btn-secondary" id="promptBoardOnlyBtn" style="justify-content:center;">✓ Board Without Collecting</button>
+        <button class="btn btn-secondary" id="promptCancelBtn" style="justify-content:center;opacity:0.75;">Cancel</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(div);
+
+  div.querySelector('#promptCollectBtn').onclick = () => {
+    div.remove();
+    openSpotPaymentModal(booking, trip, due, paxName, reloadManifest);
+  };
+
+  div.querySelector('#promptBoardOnlyBtn').onclick = async () => {
+    div.remove();
+    try {
+      await api('/manifest/board', { method: 'POST', body: JSON.stringify({ seatId, boarded: 1 }) });
+      toast(`Seat ${seatLabel} marked boarded`);
+      await reloadManifest();
+    } catch (e) { toast(e.message); }
+  };
+
+  div.querySelector('#promptCancelBtn').onclick = () => div.remove();
+}
+
+function openSpotPaymentModal(booking, trip, defaultDue, passengerName, onComplete) {
+  closeModal();
+  const div = document.createElement('div');
+  div.className = 'modal-backdrop';
+  div.id = 'spotPaymentModal';
+
+  const initialDue = Math.max(1, Math.round(Number(defaultDue) || 0));
+  let selectedMethod = 'Cash';
+
+  div.innerHTML = `
+    <div class="modal modal-form spot-pay-card" style="max-width:440px;">
+      <h2 style="margin-top:0;">💳 Spot Balance Collection</h2>
+      <p style="color:var(--ink-soft);font-size:13px;margin:-4px 0 14px;">
+        PNR: <b class="pnr">${esc(booking.pnr)}</b> · ${esc(passengerName || 'Passenger')}
+      </p>
+      <div id="spotPayErr" class="banner banner-err hidden"></div>
+
+      <div style="background:#F8FAFC;border:1px solid #E2E8F0;padding:12px 14px;border-radius:8px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <div style="font-size:11.5px;color:#64748B;text-transform:uppercase;font-weight:600;">Balance Due</div>
+          <div style="font-size:22px;font-weight:700;color:var(--primary);">${fmtMoney(defaultDue)}</div>
+        </div>
+        <div style="text-align:right;">
+          <div style="font-size:11.5px;color:#64748B;">Total Booking</div>
+          <div style="font-size:14px;font-weight:600;">${fmtMoney(booking.total_amount)}</div>
+          <div style="font-size:11.5px;color:#10B981;">Paid: ${fmtMoney(booking.amount_paid)}</div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="spotPayAmount">Amount to Collect (₹)</label>
+        <input type="number" id="spotPayAmount" min="1" max="${defaultDue}" step="1" value="${initialDue}" required>
+      </div>
+
+      <div class="field">
+        <label>Payment Mode</label>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;" id="spotMethodGroup">
+          <button type="button" class="btn btn-secondary active" data-method="Cash">💵 Cash</button>
+          <button type="button" class="btn btn-secondary" data-method="UPI">📱 UPI QR</button>
+          <button type="button" class="btn btn-secondary" data-method="Card">💳 Card</button>
+        </div>
+      </div>
+
+      <div id="spotUpiContainer" class="upi-qr-container hidden">
+        <div style="font-size:12px;font-weight:600;margin-bottom:8px;color:#1E293B;">Scan with Google Pay, PhonePe, Paytm, BHIM</div>
+        <div id="spotUpiQrBox" class="upi-qr-img"></div>
+        <div id="spotUpiAmtDisplay" style="font-size:12px;font-weight:600;color:#0F172A;margin-top:4px;">Amount: ₹${initialDue}</div>
+      </div>
+
+      <label class="checkline" style="margin:14px 0 18px;background:#F1F5F9;padding:8px 10px;border-radius:6px;">
+        <input type="checkbox" id="spotMarkBoarded" checked>
+        <span><b>Mark passenger as Boarded</b> upon payment</span>
+      </label>
+
+      <div style="display:flex;justify-content:flex-end;gap:8px;">
+        <button type="button" class="btn btn-secondary" id="spotPayCancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="spotPaySubmit">Confirm & Collect</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(div);
+
+  const amountInput = div.querySelector('#spotPayAmount');
+  const upiContainer = div.querySelector('#spotUpiContainer');
+  const upiQrBox = div.querySelector('#spotUpiQrBox');
+  const upiAmtDisplay = div.querySelector('#spotUpiAmtDisplay');
+  const errBanner = div.querySelector('#spotPayErr');
+  const submitBtn = div.querySelector('#spotPaySubmit');
+
+  function renderUpiQr() {
+    if (selectedMethod !== 'UPI') return;
+    const amt = Number(amountInput.value) || 0;
+    upiAmtDisplay.textContent = `Amount: ₹${amt}`;
+    upiQrBox.innerHTML = '';
+    const upiUri = `upi://pay?pa=sevabus@upi&pn=SevaBus&am=${amt}&tr=${booking.pnr}&cu=INR`;
+    if (window.QRCode) {
+      new QRCode(upiQrBox, {
+        text: upiUri,
+        width: 140,
+        height: 140,
+        colorDark: '#0F172A',
+        colorLight: '#FFFFFF',
+        correctLevel: QRCode.CorrectLevel.M
+      });
+    }
+  }
+
+  div.querySelectorAll('#spotMethodGroup button').forEach((btn) => {
+    btn.onclick = () => {
+      div.querySelectorAll('#spotMethodGroup button').forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      selectedMethod = btn.getAttribute('data-method');
+      if (selectedMethod === 'UPI') {
+        upiContainer.classList.remove('hidden');
+        renderUpiQr();
+      } else {
+        upiContainer.classList.add('hidden');
+      }
     };
   });
+
+  amountInput.oninput = () => {
+    if (selectedMethod === 'UPI') renderUpiQr();
+  };
+
+  div.querySelector('#spotPayCancel').onclick = () => div.remove();
+
+  submitBtn.onclick = async () => {
+    const amt = Number(amountInput.value);
+    const markBoarded = div.querySelector('#spotMarkBoarded').checked;
+    errBanner.classList.add('hidden');
+
+    if (Number.isNaN(amt) || amt <= 0) {
+      errBanner.textContent = 'Please enter a valid amount.';
+      errBanner.classList.remove('hidden');
+      return;
+    }
+
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '<span class="spin"></span>Processing…';
+
+    try {
+      await api('/bookings/' + booking.id + '/pay-balance', {
+        method: 'POST',
+        body: JSON.stringify({
+          amount: amt,
+          paymentMethod: selectedMethod,
+          markBoarded,
+        }),
+      });
+      toast(`Collected ₹${amt} via ${selectedMethod}!`);
+      div.remove();
+      if (onComplete) await onComplete();
+    } catch (err) {
+      errBanner.textContent = err.message || 'Payment collection failed.';
+      errBanner.classList.remove('hidden');
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Confirm & Collect';
+    }
+  };
+}
+
+/* ---------- Activity & Cancellation Audit Logs View ---------- */
+let auditLogsCtx = { logs: [], filter: '', loading: false, loaded: false };
+
+async function loadAuditLogs() {
+  auditLogsCtx.loading = true;
+  try {
+    auditLogsCtx.logs = await api('/audit-logs?limit=200');
+    auditLogsCtx.loaded = true;
+  } catch (err) {
+    toast('Error loading audit logs: ' + err.message);
+  } finally {
+    auditLogsCtx.loading = false;
+  }
+}
+
+function auditBadgeClass(action) {
+  const act = String(action || '').toUpperCase();
+  if (act.includes('CANCEL')) return 'audit-badge audit-cancelled';
+  if (act.includes('BOARD')) return 'audit-badge audit-boarded';
+  if (act.includes('PAY') || act.includes('BALANCE')) return 'audit-badge audit-payment';
+  if (act.includes('UPDATE')) return 'audit-badge audit-updated';
+  return 'audit-badge audit-created';
+}
+
+function formatAuditDetails(raw) {
+  if (!raw) return '—';
+  try {
+    const obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (typeof obj !== 'object' || obj == null) return esc(String(raw));
+    const parts = [];
+    if (obj.seats) parts.push(`Seats: <b>${esc(Array.isArray(obj.seats) ? obj.seats.join(', ') : obj.seats)}</b>`);
+    if (obj.amount != null) parts.push(`Amount: <b>${fmtMoney(obj.amount)}</b>`);
+    if (obj.paymentMethod) parts.push(`Method: ${esc(obj.paymentMethod)}`);
+    if (obj.pickupPoint) parts.push(`Pickup: 📍 ${esc(obj.pickupPoint)}`);
+    if (obj.pnr) parts.push(`PNR: <b>${esc(obj.pnr)}</b>`);
+    if (obj.passenger) parts.push(`Pax: ${esc(obj.passenger)}`);
+    if (obj.collector) parts.push(`Collector: ${esc(obj.collector)}`);
+    if (obj.reason) parts.push(`Reason: ${esc(obj.reason)}`);
+    if (obj.name) parts.push(`Name: ${esc(obj.name)}`);
+    if (obj.fare != null) parts.push(`Fare: ${fmtMoney(obj.fare)}`);
+    if (parts.length > 0) return parts.join(' · ');
+    return esc(JSON.stringify(obj));
+  } catch {
+    return esc(String(raw));
+  }
+}
+
+function auditLogsView() {
+  const logs = auditLogsCtx.logs || [];
+  const q = (auditLogsCtx.filter || '').trim().toLowerCase();
+  const filtered = q
+    ? logs.filter((l) =>
+        String(l.action || '').toLowerCase().includes(q) ||
+        String(l.performed_by || '').toLowerCase().includes(q) ||
+        String(l.entity_id || '').toLowerCase().includes(q) ||
+        String(l.details || '').toLowerCase().includes(q)
+      )
+    : logs;
+
+  const totalLogs = logs.length;
+  const bookingCount = logs.filter((l) => l.action && l.action.includes('BOOKING_CREATED')).length;
+  const cancelCount = logs.filter((l) => l.action && l.action.includes('CANCEL')).length;
+  const boardCount = logs.filter((l) => l.action && l.action.includes('BOARD')).length;
+  const payCount = logs.filter((l) => l.action && (l.action.includes('PAY') || l.action.includes('BALANCE'))).length;
+
+  const rows = filtered.map((l) => `
+    <tr>
+      <td style="white-space:nowrap;font-size:12px;color:var(--ink-soft);">${new Date(l.created_at).toLocaleString('en-IN')}</td>
+      <td><span class="${auditBadgeClass(l.action)}">${esc(l.action)}</span></td>
+      <td><b>${esc(l.entity_type)}</b> ${l.entity_id ? `· <span class="pnr" style="font-size:12px;">${esc(l.entity_id)}</span>` : ''}</td>
+      <td style="font-size:12.5px;">${formatAuditDetails(l.details)}</td>
+      <td><b>${esc(l.performed_by)}</b> <span class="muted" style="font-size:11px;">(${esc(l.role)})</span></td>
+    </tr>
+  `).join('');
+
+  return `
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
+    <h1 class="page-title" style="margin:0;">Activity & Cancellation Logs</h1>
+    <div style="display:flex;gap:8px;">
+      <button class="btn btn-secondary" id="refreshAuditBtn">🔄 Refresh</button>
+    </div>
+  </div>
+
+  <div class="kpi-grid" style="margin-bottom:16px;">
+    <div class="kpi-card"><div class="kpi-num">${totalLogs}</div><div class="kpi-lbl">Total Events Logged</div></div>
+    <div class="kpi-card"><div class="kpi-num">${bookingCount}</div><div class="kpi-lbl">Bookings Created</div></div>
+    <div class="kpi-card"><div class="kpi-num">${cancelCount}</div><div class="kpi-lbl">Cancellations</div></div>
+    <div class="kpi-card"><div class="kpi-num">${boardCount}</div><div class="kpi-lbl">Boarding Events</div></div>
+    <div class="kpi-card"><div class="kpi-num">${payCount}</div><div class="kpi-lbl">Balance Collections</div></div>
+  </div>
+
+  <div class="panel">
+    <div class="formrow" style="margin-bottom:12px;">
+      <div class="field" style="flex:1;">
+        <input id="auditSearchInput" placeholder="Filter by action, user, PNR, or keyword..." value="${esc(auditLogsCtx.filter || '')}">
+      </div>
+      ${auditLogsCtx.filter ? '<button class="btn btn-secondary" id="clearAuditFilterBtn">Clear</button>' : ''}
+    </div>
+
+    ${filtered.length === 0 ? `<div class="empty">No audit logs matching "${esc(auditLogsCtx.filter)}"</div>` : `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Timestamp</th>
+            <th>Action</th>
+            <th>Entity</th>
+            <th>Details</th>
+            <th>Performed By</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`}
+  </div>
+  `;
+}
+
+async function attachAuditLogs() {
+  if (!auditLogsCtx.loaded && !auditLogsCtx.loading) {
+    await loadAuditLogs();
+    const main = document.getElementById('main');
+    if (main) {
+      main.innerHTML = auditLogsView();
+      attachAuditLogs();
+    }
+    return;
+  }
+
+  const sInput = document.getElementById('auditSearchInput');
+  if (sInput) {
+    sInput.oninput = (e) => {
+      auditLogsCtx.filter = e.target.value;
+      const main = document.getElementById('main');
+      if (main) {
+        main.innerHTML = auditLogsView();
+        attachAuditLogs();
+      }
+    };
+  }
+
+  const clearBtn = document.getElementById('clearAuditFilterBtn');
+  if (clearBtn) {
+    clearBtn.onclick = () => {
+      auditLogsCtx.filter = '';
+      const main = document.getElementById('main');
+      if (main) {
+        main.innerHTML = auditLogsView();
+        attachAuditLogs();
+      }
+    };
+  }
+
+  const refBtn = document.getElementById('refreshAuditBtn');
+  if (refBtn) {
+    refBtn.onclick = async () => {
+      refBtn.disabled = true;
+      refBtn.innerHTML = '<span class="spin"></span>';
+      await loadAuditLogs();
+      const main = document.getElementById('main');
+      if (main) {
+        main.innerHTML = auditLogsView();
+        attachAuditLogs();
+      }
+    };
+  }
 }
 
 /* ---------- Admin: shared modal helpers ---------- */
@@ -2369,6 +2908,16 @@ async function attachAdminRoutesTrips() {
 
 function openRouteForm(route) {
   const isEdit = !!route;
+  let pickupsDisplay = '';
+  if (route && route.pickup_points) {
+    try {
+      const parsed = JSON.parse(route.pickup_points);
+      pickupsDisplay = Array.isArray(parsed) ? parsed.join(', ') : route.pickup_points;
+    } catch {
+      pickupsDisplay = route.pickup_points;
+    }
+  }
+
   openFormModal({
     title: isEdit ? 'Edit Route' : 'Add Route',
     submitLabel: isEdit ? 'Save Changes' : 'Create Route',
@@ -2379,15 +2928,21 @@ function openRouteForm(route) {
         <div class="field"><label for="routeDest">Destination</label><input id="routeDest" required value="${route ? esc(route.destination) : ''}" placeholder="To"></div>
       </div>
       <div class="field"><label for="routeFare">Fare per seat (₹)</label><input id="routeFare" type="number" min="0" step="1" required value="${route ? Number(route.fare || 0) : 150}"></div>
+      <div class="field"><label for="routePickups">Boarding / Pick-up Stops (Optional, comma-separated)</label>
+        <input id="routePickups" value="${esc(pickupsDisplay)}" placeholder="e.g., Gate 2 Metro - 6:00 AM, Mor Chowk - 6:15 AM">
+      </div>
       ${isEdit ? `<label class="checkline"><input type="checkbox" id="routeActive" ${route.active ? 'checked' : ''}> Active</label>` : ''}`,
     onSubmit: async () => {
       const name = document.getElementById('routeName').value.trim();
       const source = document.getElementById('routeSource').value.trim();
       const destination = document.getElementById('routeDest').value.trim();
       const fare = Number(document.getElementById('routeFare').value);
+      const pickupsRaw = document.getElementById('routePickups').value.trim();
+      const pickupPoints = pickupsRaw ? pickupsRaw.split(',').map((s) => s.trim()).filter(Boolean) : [];
+
       if (!name || !source || !destination) throw new Error('All fields are required.');
       if (Number.isNaN(fare) || fare < 0) throw new Error('Enter a valid fare.');
-      const payload = { name, source, destination, fare };
+      const payload = { name, source, destination, fare, pickupPoints };
       if (isEdit) {
         payload.active = document.getElementById('routeActive').checked;
         await api('/routes/' + route.id, { method: 'PATCH', body: JSON.stringify(payload) });
@@ -2552,6 +3107,7 @@ function openUserForm(user) {
     try {
       const { user } = await api('/me');
       state.user = user;
+      resetInactivityTimer();
       await loadCaches();
       const initialRoute = window.location.hash || '#/dashboard';
       nav(initialRoute, false);

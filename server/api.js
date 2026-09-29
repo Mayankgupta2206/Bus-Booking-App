@@ -7,7 +7,7 @@ const db = require('./db');
 const { signToken, requireAuth, requireAdmin, requireAgentOrAdmin, requireAdminOrSupervisor } = require('./auth');
 const { runBackup, BACKUP_DIR } = require('./backup');
 
-const { getBusLayout, countSeats, serializeLayout, defaultLayout, resolvePaidStatus } = db.helpers;
+const { getBusLayout, countSeats, serializeLayout, defaultLayout, resolvePaidStatus, logAudit } = db.helpers;
 const router = express.Router();
 
 // Rate limiter for login to prevent brute force
@@ -53,14 +53,18 @@ router.get('/routes', requireAuth, (req, res) => {
 });
 
 router.post('/routes', requireAuth, requireAdmin, (req, res) => {
-  const { name, source, destination, fare } = req.body || {};
+  const { name, source, destination, fare, pickupPoints } = req.body || {};
   if (!name || !source || !destination) return res.status(400).json({ error: 'This field is required.' });
   const fareNum = Number(fare);
   if (Number.isNaN(fareNum) || fareNum < 0) return res.status(400).json({ error: 'Fare must be a valid non-negative number.' });
+  const pts = pickupPoints ? (typeof pickupPoints === 'string' ? pickupPoints : JSON.stringify(pickupPoints)) : null;
   try {
-    const info = db.prepare('INSERT INTO routes (name,source,destination,fare) VALUES (?,?,?,?)')
-      .run(name, source, destination, fareNum);
-    res.status(201).json(db.prepare('SELECT * FROM routes WHERE id = ?').get(info.lastInsertRowid));
+    const info = db.prepare('INSERT INTO routes (name,source,destination,fare,pickup_points) VALUES (?,?,?,?,?)')
+      .run(name, source, destination, fareNum, pts);
+    const newRoute = db.prepare('SELECT * FROM routes WHERE id = ?').get(info.lastInsertRowid);
+    db.syncCloud();
+    logAudit('ROUTE_CREATED', 'ROUTE', newRoute.id, { name, source, destination, fare: fareNum }, req.user.name, req.user.role);
+    res.status(201).json(newRoute);
   } catch (e) {
     if (String(e).includes('UNIQUE')) return res.status(409).json({ error: 'A route with this name already exists.' });
     res.status(500).json({ error: 'Could not create route.' });
@@ -75,12 +79,16 @@ router.patch('/routes/:id', requireAuth, requireAdmin, (req, res) => {
   const destination = req.body.destination != null ? String(req.body.destination).trim() : route.destination;
   const active = req.body.active != null ? (req.body.active ? 1 : 0) : route.active;
   const fare = req.body.fare != null ? Number(req.body.fare) : route.fare;
+  const pickupPoints = req.body.pickupPoints !== undefined ? (typeof req.body.pickupPoints === 'string' ? req.body.pickupPoints : JSON.stringify(req.body.pickupPoints)) : route.pickup_points;
   if (!name || !source || !destination) return res.status(400).json({ error: 'This field is required.' });
   if (Number.isNaN(fare) || fare < 0) return res.status(400).json({ error: 'Fare must be a valid non-negative number.' });
   try {
-    db.prepare('UPDATE routes SET name=?, source=?, destination=?, active=?, fare=? WHERE id=?')
-      .run(name, source, destination, active, fare, req.params.id);
-    res.json(db.prepare('SELECT * FROM routes WHERE id = ?').get(req.params.id));
+    db.prepare('UPDATE routes SET name=?, source=?, destination=?, active=?, fare=?, pickup_points=? WHERE id=?')
+      .run(name, source, destination, active, fare, pickupPoints, req.params.id);
+    const updated = db.prepare('SELECT * FROM routes WHERE id = ?').get(req.params.id);
+    db.syncCloud();
+    logAudit('ROUTE_UPDATED', 'ROUTE', req.params.id, { name, fare }, req.user.name, req.user.role);
+    res.json(updated);
   } catch (e) {
     if (String(e).includes('UNIQUE')) return res.status(409).json({ error: 'A route with this name already exists.' });
     res.status(500).json({ error: 'Could not update route.' });
@@ -373,7 +381,8 @@ router.get('/trips/:id/seats', requireAuth, (req, res) => {
   const t = db.prepare(`SELECT t.*, b.rows AS bus_rows, b.cols AS bus_cols, b.layout_json, b.pattern
                         FROM trips t JOIN buses b ON b.id = t.bus_id WHERE t.id = ?`).get(req.params.id);
   if (!t) return res.status(404).json({ error: 'Trip not found.' });
-  const seats = db.prepare(`SELECT bs.seat_label, bs.passenger_name, bs.age, bs.gender, bs.contact,
+  const seats = db.prepare(`SELECT bs.id, bs.seat_label, bs.passenger_name, bs.age, bs.gender, bs.contact,
+                                    bs.boarded, bs.boarded_at, bs.boarded_by,
                                     bk.pnr, bk.booked_by, bk.booked_by_username, bk.booked_by_role,
                                     bk.paid_status, bk.amount_paid, bk.total_amount, bk.is_group, bk.created_at
                              FROM booking_seats bs
@@ -387,7 +396,7 @@ router.get('/trips/:id/seats', requireAuth, (req, res) => {
 
 /* ---------- Bookings ---------- */
 router.post('/bookings', requireAuth, requireAgentOrAdmin, (req, res) => {
-  const { tripId, seats, isGroup, groupContact, paidStatus, amountPaid } = req.body || {};
+  const { tripId, seats, isGroup, groupContact, paidStatus, amountPaid, pickupPoint } = req.body || {};
   if (!tripId || !Array.isArray(seats) || seats.length === 0) {
     return res.status(400).json({ error: 'Please select at least one seat.' });
   }
@@ -436,11 +445,11 @@ router.post('/bookings', requireAuth, requireAgentOrAdmin, (req, res) => {
   const tx = db.transaction(() => {
     const bookingInfo = db.prepare(`INSERT INTO bookings
       (pnr, trip_id, booked_by, booked_by_username, booked_by_role, is_group, group_contact,
-       fare_per_seat, total_amount, paid_status, amount_paid)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(
+       fare_per_seat, total_amount, paid_status, amount_paid, pickup_point)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       pnr, tripId, req.user.name, req.user.username, req.user.role,
       isGroup ? 1 : 0, isGroup ? sharedContact : null,
-      farePerSeat, totalAmount, status, paidAmt
+      farePerSeat, totalAmount, status, paidAmt, pickupPoint || null
     );
     bookingId = bookingInfo.lastInsertRowid;
     const insertSeat = db.prepare(`INSERT INTO booking_seats (booking_id,trip_id,seat_label,passenger_name,age,gender,contact)
@@ -453,6 +462,14 @@ router.post('/bookings', requireAuth, requireAgentOrAdmin, (req, res) => {
 
   try {
     tx();
+    db.syncCloud();
+    logAudit('BOOKING_CREATED', 'BOOKING', pnr, {
+      seats: seats.map(s => s.label),
+      totalAmount,
+      amountPaid: paidAmt,
+      paidStatus: status,
+      pickupPoint
+    }, req.user.name, req.user.role);
   } catch (e) {
     if (String(e).includes('UNIQUE')) {
       return res.status(409).json({ error: 'One or more selected seats are no longer available. Please refresh and try again.' });
@@ -463,6 +480,7 @@ router.post('/bookings', requireAuth, requireAgentOrAdmin, (req, res) => {
   res.status(201).json({
     pnr, tripId, seats, bookingId,
     farePerSeat, totalAmount, paidStatus: status, amountPaid: paidAmt,
+    pickupPoint: pickupPoint || null,
     bookedBy: { name: req.user.name, username: req.user.username, role: req.user.role },
   });
 });
@@ -769,6 +787,108 @@ router.get('/admin/backups', requireAuth, requireAdmin, (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message || 'Failed to list backups.' });
   }
+});
+
+/* ---------- Manifest: Boarding Check-In ---------- */
+router.post('/manifest/board', requireAuth, (req, res) => {
+  const { seatId, bookingId, boarded } = req.body || {};
+  const boardedVal = boarded ? 1 : 0;
+  const now = new Date().toISOString();
+
+  if (seatId) {
+    const seat = db.prepare('SELECT bs.*, b.pnr FROM booking_seats bs JOIN bookings b ON b.id = bs.booking_id WHERE bs.id = ?').get(seatId);
+    if (!seat) return res.status(404).json({ error: 'Seat not found.' });
+    db.prepare('UPDATE booking_seats SET boarded = ?, boarded_at = ?, boarded_by = ? WHERE id = ?')
+      .run(boardedVal, boardedVal ? now : null, boardedVal ? req.user.name : null, seatId);
+    db.syncCloud();
+    logAudit(boardedVal ? 'PASSENGER_BOARDED' : 'BOARDING_UNMARKED', 'SEAT', seat.seat_label, { pnr: seat.pnr, passenger: seat.passenger_name }, req.user.name, req.user.role);
+    return res.json({ success: true, seatId, boarded: boardedVal });
+  }
+
+  if (bookingId) {
+    const b = db.prepare('SELECT pnr FROM bookings WHERE id = ?').get(bookingId);
+    if (!b) return res.status(404).json({ error: 'Booking not found.' });
+    db.prepare('UPDATE booking_seats SET boarded = ?, boarded_at = ?, boarded_by = ? WHERE booking_id = ?')
+      .run(boardedVal, boardedVal ? now : null, boardedVal ? req.user.name : null, bookingId);
+    db.syncCloud();
+    logAudit(boardedVal ? 'GROUP_BOARDED' : 'GROUP_BOARDING_UNMARKED', 'BOOKING', b.pnr, { bookingId }, req.user.name, req.user.role);
+    return res.json({ success: true, bookingId, boarded: boardedVal });
+  }
+
+  res.status(400).json({ error: 'seatId or bookingId is required.' });
+});
+
+/* ---------- Bookings: Spot Balance Payment at Boarding ---------- */
+router.post('/bookings/:id/pay-balance', requireAuth, (req, res) => {
+  const booking = db.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id);
+  if (!booking) return res.status(404).json({ error: 'Booking not found.' });
+
+  const amount = Number(req.body.amount);
+  const paymentMethod = req.body.paymentMethod || 'Cash';
+  const markBoarded = Boolean(req.body.markBoarded);
+
+  if (Number.isNaN(amount) || amount <= 0) {
+    return res.status(400).json({ error: 'Please enter a valid payment amount.' });
+  }
+
+  const currentPaid = Number(booking.amount_paid || 0);
+  const totalAmount = Number(booking.total_amount || 0);
+  const due = Math.max(0, totalAmount - currentPaid);
+
+  if (amount > due + 0.01) {
+    return res.status(400).json({ error: `Amount cannot exceed balance due of ₹${due.toFixed(2)}.` });
+  }
+
+  const newPaid = currentPaid + amount;
+  const newStatus = resolvePaidStatus(newPaid, totalAmount);
+  const now = new Date().toISOString();
+
+  const tx = db.transaction(() => {
+    db.prepare('UPDATE bookings SET amount_paid = ?, paid_status = ? WHERE id = ?')
+      .run(newPaid, newStatus, req.params.id);
+
+    if (markBoarded) {
+      db.prepare('UPDATE booking_seats SET boarded = 1, boarded_at = ?, boarded_by = ? WHERE booking_id = ?')
+        .run(now, req.user.name, req.params.id);
+    }
+  });
+
+  try {
+    tx();
+    db.syncCloud();
+  } catch (err) {
+    return res.status(500).json({ error: 'Payment processing failed: ' + err.message });
+  }
+
+  logAudit('BALANCE_COLLECTED', 'BOOKING', booking.pnr, {
+    amount,
+    paymentMethod,
+    newPaid,
+    newStatus,
+    markBoarded,
+    collector: req.user.name
+  }, req.user.name, req.user.role);
+
+  const updated = db.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id);
+  const seats = db.prepare('SELECT * FROM booking_seats WHERE booking_id = ?').all(req.params.id);
+  res.json({ success: true, booking: { ...updated, seats }, amountPaid: newPaid, paidStatus: newStatus });
+});
+
+/* ---------- Audit Logs ---------- */
+router.get('/audit-logs', requireAuth, requireAdminOrSupervisor, (req, res) => {
+  const limit = Math.min(200, Math.max(10, Number(req.query.limit) || 100));
+  const rawLogs = db.prepare('SELECT * FROM audit_logs ORDER BY id DESC LIMIT ?').all(limit);
+  const logs = rawLogs.map((l) => ({
+    id: l.id != null ? l.id : l.ID,
+    action: l.action || l.ACTION || '',
+    entity_type: l.entity_type || l.ENTITY_TYPE || '',
+    entity_id: l.entity_id || l.ENTITY_ID || '',
+    details: l.details || l.DETAILS || '',
+    performed_by: l.performed_by || l.PERFORMED_BY || '',
+    role: l.role || l.ROLE || '',
+    created_at: l.created_at || l.CREATED_AT || '',
+  }));
+  res.json(logs);
 });
 
 module.exports = router;
