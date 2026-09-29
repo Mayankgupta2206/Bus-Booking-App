@@ -1600,6 +1600,7 @@ function renderManifestBody({ trip, seatData, bookings }) {
         </select>
       </div>
       <label class="checkline" style="margin:0;"><input type="checkbox" id="mGroupBy" ${manifestCtx.groupByAgent ? 'checked' : ''}> Separate by booked-by</label>
+      <button class="btn btn-primary" id="scanTicketBtn" style="font-weight:600;">📷 Scan Ticket</button>
       <button class="btn btn-secondary" id="exportCsvBtn">Export CSV</button>
       <button class="btn btn-secondary" id="printBtn">Print Manifest</button>
     </div>
@@ -1661,6 +1662,11 @@ async function attachManifest() {
   const exportBtn = document.getElementById('exportCsvBtn');
   if (exportBtn && manifestCtx.data) {
     exportBtn.onclick = () => downloadManifestCsv(manifestCtx.data.trip, manifestCtx.data.bookings);
+  }
+
+  const scanTicketBtn = document.getElementById('scanTicketBtn');
+  if (scanTicketBtn && manifestCtx.data) {
+    scanTicketBtn.onclick = () => openTicketScannerModal(reloadManifest);
   }
 
   const reloadManifest = async () => {
@@ -1758,6 +1764,400 @@ async function attachManifest() {
       });
     };
   });
+}
+
+/* ---------- In-App Camera Ticket QR Scanner ---------- */
+function openTicketScannerModal(reloadManifest) {
+  closeModal();
+  if (!manifestCtx.data) return;
+
+  const { trip } = manifestCtx.data;
+
+  const div = document.createElement('div');
+  div.className = 'modal-backdrop';
+  div.id = 'scannerModalBackdrop';
+  div.innerHTML = `
+    <div class="modal" style="max-width:440px;text-align:center;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+        <h2 style="margin:0;font-size:18px;">📷 Scan Boarding Pass</h2>
+        <button class="btn btn-secondary btn-sm" id="closeScannerTopBtn" style="padding:2px 8px;font-size:14px;">✕</button>
+      </div>
+      <p style="font-size:12px;color:var(--ink-soft);margin:0 0 12px;">
+        ${esc(trip.route_name)} · ${fmtDate(trip.date)}, ${esc(trip.time)} (${esc(trip.bus_name)})
+      </p>
+
+      <div class="scanner-viewport-wrap">
+        <video id="scannerVideo" class="scanner-video" playsinline autoplay muted></video>
+        <canvas id="scannerCanvas" style="display:none;"></canvas>
+        <div class="scanner-overlay">
+          <div class="scanner-reticle">
+            <div class="scanner-laser"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="scannerStatusBadge" style="font-size:12px;color:var(--ink-soft);margin-bottom:8px;">
+        Point camera at passenger's ticket QR code
+      </div>
+
+      <div id="scannerResultArea"></div>
+
+      <div style="margin-top:12px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
+        <button class="btn btn-secondary btn-sm" id="switchCameraBtn">🔄 Flip Camera</button>
+        <button class="btn btn-secondary btn-sm" id="toggleTorchBtn" style="display:none;">💡 Flashlight</button>
+        <button class="btn btn-secondary btn-sm" id="closeScannerBtn">Done / Close</button>
+      </div>
+
+      <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--line);text-align:left;">
+        <label style="font-size:11.5px;font-weight:600;color:var(--ink-soft);">Or Enter PNR Manually</label>
+        <div style="display:flex;gap:6px;margin-top:4px;">
+          <input type="text" id="manualPnrInput" placeholder="e.g. PNR712019" style="font-family:'IBM Plex Mono',monospace;text-transform:uppercase;">
+          <button class="btn btn-secondary btn-sm" id="manualPnrBtn">Verify & Board</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(div);
+
+  let activeStream = null;
+  let currentFacingMode = 'environment';
+  let animationFrameId = null;
+  let isScanningActive = true;
+  let currentTrack = null;
+  let torchState = false;
+
+  const video = div.querySelector('#scannerVideo');
+  const canvas = div.querySelector('#scannerCanvas');
+  const statusBadge = div.querySelector('#scannerStatusBadge');
+  const resultArea = div.querySelector('#scannerResultArea');
+  const torchBtn = div.querySelector('#toggleTorchBtn');
+
+  function playScanSound(success = true) {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = 'sine';
+      if (success) {
+        osc.frequency.setValueAtTime(880, ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(1760, ctx.currentTime + 0.15);
+        gain.gain.setValueAtTime(0.2, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.2);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.2);
+      } else {
+        osc.frequency.setValueAtTime(260, ctx.currentTime);
+        osc.frequency.setValueAtTime(180, ctx.currentTime + 0.1);
+        gain.gain.setValueAtTime(0.25, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.3);
+      }
+    } catch (e) {}
+  }
+
+  function cleanUp() {
+    isScanningActive = false;
+    if (animationFrameId) cancelAnimationFrame(animationFrameId);
+    if (activeStream) {
+      activeStream.getTracks().forEach((track) => track.stop());
+      activeStream = null;
+    }
+    div.remove();
+  }
+
+  div.querySelector('#closeScannerTopBtn').onclick = cleanUp;
+  div.querySelector('#closeScannerBtn').onclick = cleanUp;
+
+  async function startCamera(facingMode) {
+    if (activeStream) {
+      activeStream.getTracks().forEach((t) => t.stop());
+      activeStream = null;
+    }
+    try {
+      statusBadge.textContent = 'Starting camera…';
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: facingMode },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      });
+      activeStream = stream;
+      video.srcObject = stream;
+      await video.play();
+
+      const track = stream.getVideoTracks()[0];
+      currentTrack = track;
+      if (track && track.getCapabilities && track.getCapabilities().torch) {
+        torchBtn.style.display = 'inline-flex';
+      } else {
+        torchBtn.style.display = 'none';
+      }
+
+      statusBadge.textContent = 'Point camera at passenger\'s ticket QR code';
+      scanLoop();
+    } catch (err) {
+      statusBadge.innerHTML = `<span style="color:var(--err);">Camera error: ${esc(err.message || 'Permission denied')}. Use manual PNR input below.</span>`;
+    }
+  }
+
+  torchBtn.onclick = async () => {
+    if (!currentTrack || !currentTrack.applyConstraints) return;
+    try {
+      torchState = !torchState;
+      await currentTrack.applyConstraints({ advanced: [{ torch: torchState }] });
+      torchBtn.textContent = torchState ? '🔦 Flashlight (ON)' : '💡 Flashlight';
+    } catch (e) {}
+  };
+
+  div.querySelector('#switchCameraBtn').onclick = async () => {
+    currentFacingMode = currentFacingMode === 'environment' ? 'user' : 'environment';
+    await startCamera(currentFacingMode);
+  };
+
+  let barcodeDetector = null;
+  if ('BarcodeDetector' in window) {
+    try {
+      barcodeDetector = new window.BarcodeDetector({ formats: ['qr_code'] });
+    } catch (e) {}
+  }
+
+  function scanLoop() {
+    if (!isScanningActive || !activeStream) return;
+
+    if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+      if (barcodeDetector) {
+        barcodeDetector.detect(video).then((barcodes) => {
+          if (barcodes && barcodes.length > 0 && barcodes[0].rawValue) {
+            handleScannedPayload(barcodes[0].rawValue);
+          } else if (isScanningActive) {
+            animationFrameId = requestAnimationFrame(scanLoop);
+          }
+        }).catch(() => {
+          fallbackJsQR();
+        });
+        return;
+      } else {
+        fallbackJsQR();
+        return;
+      }
+    }
+    animationFrameId = requestAnimationFrame(scanLoop);
+  }
+
+  function fallbackJsQR() {
+    if (!isScanningActive) return;
+    try {
+      if (window.jsQR && video.videoWidth > 0 && video.videoHeight > 0) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = window.jsQR(imgData.data, imgData.width, imgData.height, {
+          inversionAttempts: 'dontInvert',
+        });
+        if (code && code.data) {
+          handleScannedPayload(code.data);
+          return;
+        }
+      }
+    } catch (e) {}
+    if (isScanningActive) {
+      animationFrameId = requestAnimationFrame(scanLoop);
+    }
+  }
+
+  function resumeScanning() {
+    resultArea.innerHTML = '';
+    statusBadge.textContent = 'Point camera at passenger\'s ticket QR code';
+    isScanningActive = true;
+    scanLoop();
+  }
+
+  async function handleScannedPayload(rawText) {
+    isScanningActive = false;
+    if (navigator.vibrate) {
+      try { navigator.vibrate(100); } catch (e) {}
+    }
+
+    const pnrMatch = rawText.match(/PNR\d{6}/i);
+    const pnr = pnrMatch ? pnrMatch[0].toUpperCase() : null;
+
+    if (!pnr) {
+      playScanSound(false);
+      resultArea.innerHTML = `
+        <div class="scan-result-card scan-result-err">
+          <b>❌ Unrecognized QR Code</b>
+          <div style="font-size:12px;margin-top:2px;">No valid Seva Bus PNR found in scanned code.</div>
+          <button class="btn btn-secondary btn-sm" id="rescanBtn" style="margin-top:6px;">Scan Again</button>
+        </div>
+      `;
+      div.querySelector('#rescanBtn').onclick = resumeScanning;
+      return;
+    }
+
+    const currentBookings = manifestCtx.data?.bookings || [];
+    const b = currentBookings.find((x) => x.pnr.toUpperCase() === pnr);
+
+    if (!b) {
+      playScanSound(false);
+      resultArea.innerHTML = `
+        <div class="scan-result-card scan-result-warn">
+          <b>⚠️ Ticket Not on this Trip</b>
+          <div style="font-size:12px;margin-top:3px;">
+            PNR <b>${esc(pnr)}</b> is not booked on this specific bus/manifest.
+          </div>
+          <div style="margin-top:8px;display:flex;gap:6px;justify-content:center;">
+            <button class="btn btn-secondary btn-sm" id="rescanBtn">Scan Next</button>
+            <a class="btn btn-primary btn-sm" href="#/search?q=${encodeURIComponent(pnr)}" target="_blank" style="text-decoration:none;">Search PNR ↗</a>
+          </div>
+        </div>
+      `;
+      div.querySelector('#rescanBtn').onclick = resumeScanning;
+      return;
+    }
+
+    const seats = b.seats || [];
+    const unboardedSeats = seats.filter((s) => !s.boarded);
+    const seatLabels = seats.map((s) => s.seat_label).join(', ');
+    const paxNames = seats.map((s) => s.passenger_name).filter(Boolean).join(', ') || 'Passenger';
+    const total = Number(b.total_amount || 0);
+    const paid = Number(b.amount_paid || 0);
+    const due = Math.max(0, total - paid);
+
+    if (unboardedSeats.length === 0) {
+      playScanSound(true);
+      resultArea.innerHTML = `
+        <div class="scan-result-card scan-result-warn">
+          <b>ℹ️ Already Boarded</b>
+          <div style="font-size:12px;margin-top:3px;">
+            PNR: <b>${esc(pnr)}</b> · Seats: <b>${esc(seatLabels)}</b><br>
+            Passenger: <b>${esc(paxNames)}</b><br>
+            All passenger(s) on this ticket have already been marked as boarded.
+          </div>
+          <button class="btn btn-secondary btn-sm" id="rescanBtn" style="margin-top:8px;">Scan Next Ticket</button>
+        </div>
+      `;
+      div.querySelector('#rescanBtn').onclick = resumeScanning;
+      return;
+    }
+
+    if (due > 0) {
+      playScanSound(false);
+      resultArea.innerHTML = `
+        <div class="scan-result-card scan-result-warn">
+          <b>⚠️ Pending Payment Due: ₹${due}</b>
+          <div style="font-size:12px;margin-top:3px;">
+            PNR: <b>${esc(pnr)}</b> · Seats: <b>${esc(seatLabels)}</b><br>
+            Passenger: <b>${esc(paxNames)}</b><br>
+            Total: ${fmtMoney(total)} · Paid: ${fmtMoney(paid)}
+          </div>
+          <div style="margin-top:10px;display:flex;gap:6px;justify-content:center;flex-wrap:wrap;">
+            <button class="btn btn-primary btn-sm" id="scannerCollectDueBtn">💵 Collect ₹${due} & Board</button>
+            <button class="btn btn-secondary btn-sm" id="scannerBoardOnlyBtn">Board Without Collecting</button>
+            <button class="btn btn-secondary btn-sm" id="rescanBtn">Cancel</button>
+          </div>
+        </div>
+      `;
+
+      div.querySelector('#scannerCollectDueBtn').onclick = () => {
+        cleanUp();
+        promptBoardWithDue(b, trip, unboardedSeats[0]?.id, seatLabels, due, paxNames, reloadManifest);
+      };
+
+      div.querySelector('#scannerBoardOnlyBtn').onclick = async () => {
+        try {
+          await api('/manifest/board', {
+            method: 'POST',
+            body: JSON.stringify({ bookingId: b.id, boarded: 1 }),
+          });
+          playScanSound(true);
+          toast(`Boarded PNR ${pnr} (${seatLabels})`);
+          await reloadManifest();
+          resultArea.innerHTML = `
+            <div class="scan-result-card scan-result-success">
+              <b>✅ Marked Boarded!</b>
+              <div style="font-size:12px;margin-top:2px;">
+                Seats <b>${esc(seatLabels)}</b> marked boarded.
+              </div>
+              <button class="btn btn-primary btn-sm" id="rescanBtn" style="margin-top:8px;">Scan Next Ticket</button>
+            </div>
+          `;
+          div.querySelector('#rescanBtn').onclick = resumeScanning;
+        } catch (err) {
+          toast('Error: ' + err.message);
+        }
+      };
+
+      div.querySelector('#rescanBtn').onclick = resumeScanning;
+      return;
+    }
+
+    // Fully paid! Mark boarded immediately!
+    try {
+      await api('/manifest/board', {
+        method: 'POST',
+        body: JSON.stringify({ bookingId: b.id, boarded: 1 }),
+      });
+      playScanSound(true);
+      if (navigator.vibrate) try { navigator.vibrate([80, 50, 80]); } catch (e) {}
+      toast(`✅ PNR ${pnr} (${seatLabels}) Boarded!`);
+      await reloadManifest();
+
+      resultArea.innerHTML = `
+        <div class="scan-result-card scan-result-success">
+          <b>✅ Verified & Boarded!</b>
+          <div style="font-size:12px;margin-top:3px;">
+            PNR: <b>${esc(pnr)}</b> · Seats: <b>${esc(seatLabels)}</b><br>
+            Passenger: <b>${esc(paxNames)}</b><br>
+            Status: <span class="pill pill-ok" style="font-size:11px;">Paid in Full</span>
+          </div>
+          <button class="btn btn-primary btn-sm" id="rescanBtn" style="margin-top:8px;">Scan Next Ticket</button>
+        </div>
+      `;
+      div.querySelector('#rescanBtn').onclick = resumeScanning;
+
+      // Automatically ready for next ticket in 2.2 seconds
+      setTimeout(() => {
+        if (document.getElementById('scannerModalBackdrop') && !isScanningActive && resultArea.querySelector('.scan-result-success')) {
+          resumeScanning();
+        }
+      }, 2200);
+
+    } catch (err) {
+      playScanSound(false);
+      resultArea.innerHTML = `
+        <div class="scan-result-card scan-result-err">
+          <b>❌ Boarding Error</b>
+          <div style="font-size:12px;margin-top:2px;">${esc(err.message || 'Could not board seat')}</div>
+          <button class="btn btn-secondary btn-sm" id="rescanBtn" style="margin-top:6px;">Try Again</button>
+        </div>
+      `;
+      div.querySelector('#rescanBtn').onclick = resumeScanning;
+    }
+  }
+
+  // Manual PNR fallback
+  const manualInput = div.querySelector('#manualPnrInput');
+  const manualBtn = div.querySelector('#manualPnrBtn');
+  if (manualBtn && manualInput) {
+    const submitManual = () => {
+      const val = manualInput.value.trim();
+      if (!val) return;
+      handleScannedPayload(val);
+      manualInput.value = '';
+    };
+    manualBtn.onclick = submitManual;
+    manualInput.onkeydown = (e) => { if (e.key === 'Enter') submitManual(); };
+  }
+
+  // Start camera
+  startCamera(currentFacingMode);
 }
 
 function promptBoardWithDue(booking, trip, seatId, seatLabel, due, paxName, reloadManifest) {
