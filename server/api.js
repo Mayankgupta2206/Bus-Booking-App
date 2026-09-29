@@ -505,6 +505,52 @@ router.get('/bookings', requireAuth, (req, res) => {
   res.json(result);
 });
 
+/* ---------- Global PNR / Phone / Passenger Search ---------- */
+router.get('/bookings/search', requireAuth, (req, res) => {
+  const q = String(req.query.q || '').trim();
+  if (!q || q.length < 2) {
+    return res.json({ bookings: [], cancelled: [] });
+  }
+  const term = `%${q}%`;
+  const cleanDigits = q.replace(/\D/g, '');
+  const phoneTerm = cleanDigits.length >= 4 ? `%${cleanDigits}%` : term;
+
+  const bookings = db.prepare(`
+    SELECT DISTINCT b.*, t.date AS trip_date, t.time AS trip_time, t.status AS trip_status,
+                    r.name AS route_name, r.source, r.destination, bu.name AS bus_name
+    FROM bookings b
+    JOIN trips t ON t.id = b.trip_id
+    JOIN routes r ON r.id = t.route_id
+    JOIN buses bu ON bu.id = t.bus_id
+    LEFT JOIN booking_seats bs ON bs.booking_id = b.id
+    WHERE b.pnr LIKE ?
+       OR b.group_contact LIKE ?
+       OR b.booked_by LIKE ?
+       OR b.pickup_point LIKE ?
+       OR bs.passenger_name LIKE ?
+       OR bs.contact LIKE ?
+       OR bs.seat_label LIKE ?
+       OR r.name LIKE ?
+       OR bu.name LIKE ?
+    ORDER BY t.date DESC, b.id DESC
+    LIMIT 30
+  `).all(term, phoneTerm, term, term, term, phoneTerm, term, term, term);
+
+  const withSeats = bookings.map((b) => ({
+    ...b,
+    seats: db.prepare('SELECT * FROM booking_seats WHERE booking_id = ?').all(b.id),
+  }));
+
+  const cancelled = db.prepare(`
+    SELECT * FROM cancelled_bookings
+    WHERE pnr LIKE ? OR seats_list LIKE ? OR booked_by LIKE ? OR route_name LIKE ? OR cancelled_by LIKE ?
+    ORDER BY id DESC
+    LIMIT 15
+  `).all(term, term, term, term, term);
+
+  res.json({ bookings: withSeats, cancelled });
+});
+
 router.get('/bookings/:id', requireAuth, (req, res) => {
   const b = db.prepare(`
     SELECT b.*, t.date AS trip_date, t.time AS trip_time, t.status AS trip_status,
@@ -615,46 +661,6 @@ router.get('/dashboard/stats', requireAuth, (req, res) => {
     totalDueAllTime: allTimeDue,
     recentBookings,
   });
-});
-
-/* ---------- Global PNR / Phone / Passenger Search ---------- */
-router.get('/bookings/search', requireAuth, (req, res) => {
-  const q = String(req.query.q || '').trim();
-  if (!q || q.length < 2) {
-    return res.json({ bookings: [], cancelled: [] });
-  }
-  const term = `%${q}%`;
-  const bookings = db.prepare(`
-    SELECT DISTINCT b.*, t.date AS trip_date, t.time AS trip_time, t.status AS trip_status,
-                    r.name AS route_name, r.source, r.destination, bu.name AS bus_name
-    FROM bookings b
-    JOIN trips t ON t.id = b.trip_id
-    JOIN routes r ON r.id = t.route_id
-    JOIN buses bu ON bu.id = t.bus_id
-    LEFT JOIN booking_seats bs ON bs.booking_id = b.id
-    WHERE b.pnr LIKE ?
-       OR b.group_contact LIKE ?
-       OR b.booked_by LIKE ?
-       OR bs.passenger_name LIKE ?
-       OR bs.contact LIKE ?
-       OR bs.seat_label LIKE ?
-    ORDER BY t.date DESC, b.id DESC
-    LIMIT 25
-  `).all(term, term, term, term, term, term);
-
-  const withSeats = bookings.map((b) => ({
-    ...b,
-    seats: db.prepare('SELECT * FROM booking_seats WHERE booking_id = ?').all(b.id),
-  }));
-
-  const cancelled = db.prepare(`
-    SELECT * FROM cancelled_bookings
-    WHERE pnr LIKE ? OR seats_list LIKE ? OR booked_by LIKE ?
-    ORDER BY id DESC
-    LIMIT 10
-  `).all(term, term, term);
-
-  res.json({ bookings: withSeats, cancelled });
 });
 
 /* ---------- Booking Cancellation & Seat Release ---------- */

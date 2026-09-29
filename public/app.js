@@ -464,22 +464,28 @@ function shareTicketWhatsapp(booking, trip) {
   const due = Math.max(0, Number(booking.total_amount || 0) - Number(booking.amount_paid || 0));
   const pickup = booking.pickup_point ? `\n📍 *Pickup Stop:* ${booking.pickup_point}` : '';
 
-  const text = 
-`🎫 *SEVA BUS BOOKING PASS*
-*PNR:* ${pnr}
-🛣️ *Route:* ${route}
-📅 *Date & Time:* ${date} at ${time}
-🚌 *Bus:* ${bus}${pickup}
-💺 *Seat(s):* ${seats}
-👤 *Passenger(s):* ${passengerNames}
-💰 *Fare:* ${total} · Paid: ${paid} (${status})${due > 0 ? ` · *Due at Boarding:* ₹${due.toFixed(2)}` : ''}
+  const lines = [
+    '🎫 *SEVA BUS BOOKING PASS*',
+    `*PNR:* ${pnr}`,
+    `📍 *Route:* ${route}`,
+    `📅 *Date & Time:* ${date} at ${time}`,
+    `🚌 *Bus:* ${bus}${pickup}`,
+    `💺 *Seat(s):* ${seats}`,
+    `👤 *Passenger(s):* ${passengerNames}`,
+    `💵 *Fare:* ${total} · Paid: ${paid} (${status})${due > 0 ? ` · *Due at Boarding:* ₹${due.toFixed(2)}` : ''}`,
+    '',
+    '🙏 *Thank you for choosing Seva Bus. Have a safe and pleasant journey!*'
+  ];
 
-Have a safe and comfortable journey with Seva Bus!`;
-
+  const text = lines.join('\n');
   const rawPhone = (booking.seats && booking.seats[0] && booking.seats[0].contact) || booking.group_contact || '';
   const digits = String(rawPhone).replace(/\D/g, '');
   const phoneParam = digits.length >= 10 ? (digits.length === 10 ? '91' + digits : digits) : '';
-  const url = phoneParam ? `https://wa.me/${phoneParam}?text=${encodeURIComponent(text)}` : `https://wa.me/?text=${encodeURIComponent(text)}`;
+  const encodedText = encodeURIComponent(text);
+  const url = phoneParam
+    ? `https://api.whatsapp.com/send?phone=${phoneParam}&text=${encodedText}`
+    : `https://api.whatsapp.com/send?text=${encodedText}`;
+
   window.open(url, '_blank');
 }
 
@@ -898,9 +904,11 @@ function searchView() {
                 <b>${esc(b.route_name)}</b> · ${esc(b.bus_name)} · <span>${fmtDate(b.trip_date)}, ${esc(b.trip_time)}</span>
                 <span style="margin-left:8px;">${tripStatusPill(b.trip_status)}</span>
               </div>
-              <div style="display:flex;gap:6px;align-items:center;">
+              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
                 ${paidPill(b.paid_status)}
                 <button class="btn btn-secondary btn-sm" data-view-ticket="${b.id}">Print Pass</button>
+                <button class="btn btn-whatsapp btn-sm" data-search-wa="${b.id}">💬 WA</button>
+                ${bal > 0 ? `<button class="btn btn-primary btn-sm" data-search-collect="${b.id}" data-due="${bal}">💳 Collect ₹${bal}</button>` : ''}
                 ${(canManage() || roleIs('Supervisor') || b.booked_by_username === state.user.username)
             ? `<button class="btn btn-danger btn-sm" data-cancel-b="${b.id}" data-pnr="${esc(b.pnr)}">Cancel Booking</button>`
             : ''}
@@ -908,6 +916,7 @@ function searchView() {
             </div>
             <div style="font-size:13px;color:var(--ink-soft);margin-bottom:8px;">
               Booked by: <b>${esc(b.booked_by)}</b> ${b.booked_by_role ? '(' + esc(b.booked_by_role) + ')' : ''} · Total: <b>${fmtMoney(b.total_amount)}</b> · Paid: <b>${fmtMoney(b.amount_paid)}</b> · Due: <b style="color:${bal > 0 ? 'var(--err)' : 'inherit'};">${fmtMoney(bal)}</b>
+              ${b.pickup_point ? ` · Pickup: 📍 <b>${esc(b.pickup_point)}</b>` : ''}
             </div>
             <div class="table-wrap">
               <table>
@@ -978,6 +987,26 @@ function attachSearch() {
       const bId = b.getAttribute('data-view-ticket');
       const booking = (searchCtx.results && searchCtx.results.bookings || []).find((x) => String(x.id) === String(bId));
       if (booking) openTicketModal(booking, { route_name: booking.route_name, bus_name: booking.bus_name, date: booking.trip_date, time: booking.trip_time });
+    };
+  });
+
+  document.querySelectorAll('[data-search-wa]').forEach((b) => {
+    b.onclick = () => {
+      const bId = b.getAttribute('data-search-wa');
+      const booking = (searchCtx.results && searchCtx.results.bookings || []).find((x) => String(x.id) === String(bId));
+      if (booking) shareTicketWhatsapp(booking, { route_name: booking.route_name, bus_name: booking.bus_name, date: booking.trip_date, time: booking.trip_time });
+    };
+  });
+
+  document.querySelectorAll('[data-search-collect]').forEach((b) => {
+    b.onclick = () => {
+      const bId = b.getAttribute('data-search-collect');
+      const due = Number(b.getAttribute('data-due')) || 0;
+      const booking = (searchCtx.results && searchCtx.results.bookings || []).find((x) => String(x.id) === String(bId));
+      if (booking) {
+        const trip = { route_name: booking.route_name, bus_name: booking.bus_name, date: booking.trip_date, time: booking.trip_time };
+        openSpotPaymentModal(booking, trip, due, booking.seats?.[0]?.passenger_name, () => triggerSearch());
+      }
     };
   });
 
