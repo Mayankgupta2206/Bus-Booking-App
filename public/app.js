@@ -450,6 +450,8 @@ function attachRoute() {
 }
 
 /* ---------- Ticket Modal & WhatsApp Sharing ---------- */
+const WA_ICON_SVG = '<svg class="wa-icon" viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true" style="vertical-align:-2px;display:inline-block;flex-shrink:0;"><path d="M12.04 2C6.5 2 2 6.5 2 12.04c0 1.85.5 3.66 1.46 5.25L2 22l4.87-1.42c1.53.9 3.29 1.38 5.17 1.38 5.54 0 10.04-4.5 10.04-10.04C22.08 6.5 17.58 2 12.04 2zm0 18.27c-1.63 0-3.17-.46-4.51-1.28l-.32-.2-3.35.98.9-3.26-.22-.35A8.15 8.15 0 013.88 12c0-4.51 3.66-8.17 8.16-8.17 4.5 0 8.16 3.66 8.16 8.17 0 4.5-3.66 8.27-8.16 8.27zm4.72-6.14c-.26-.13-1.53-.76-1.77-.85-.24-.09-.41-.13-.58.13-.17.26-.67.85-.82 1.02-.15.17-.3.2-.56.06-.26-.13-1.09-.4-2.08-1.28-.77-.69-1.29-1.54-1.44-1.8-.15-.26-.02-.4.11-.53.12-.12.26-.3.39-.46.13-.15.17-.26.26-.43.09-.17.04-.32-.02-.45-.06-.13-.58-1.41-.8-1.93-.21-.51-.43-.44-.59-.45h-.5c-.17 0-.45.06-.69.32-.24.26-.91.89-.91 2.17 0 1.28.93 2.51 1.06 2.68.13.17 1.83 2.79 4.43 3.91.62.27 1.1.43 1.48.55.62.2 1.19.17 1.63.1.5-.07 1.53-.63 1.75-1.23.21-.61.21-1.13.15-1.23-.07-.1-.24-.17-.5-.3z"/></svg>';
+
 function shareTicketWhatsapp(booking, trip) {
   const pnr = booking.pnr || '';
   const route = trip?.route_name || booking.route_name || 'Seva Bus';
@@ -483,8 +485,8 @@ function shareTicketWhatsapp(booking, trip) {
   const phoneParam = digits.length >= 10 ? (digits.length === 10 ? '91' + digits : digits) : '';
   const encodedText = encodeURIComponent(text);
   const url = phoneParam
-    ? `https://api.whatsapp.com/send?phone=${phoneParam}&text=${encodedText}`
-    : `https://api.whatsapp.com/send?text=${encodedText}`;
+    ? `https://wa.me/${phoneParam}?text=${encodedText}`
+    : `https://wa.me/?text=${encodedText}`;
 
   window.open(url, '_blank');
 }
@@ -550,7 +552,7 @@ function openTicketModal(booking, trip) {
       </div>
 
       <div class="actions-row no-print" style="justify-content:flex-end;margin-top:18px;gap:8px;">
-        <button class="btn btn-whatsapp" id="ticketShareWaBtn" title="Share via WhatsApp">💬 Share WhatsApp</button>
+        <button class="btn btn-whatsapp" id="ticketShareWaBtn" title="Share via WhatsApp">${WA_ICON_SVG} Share WhatsApp</button>
         <button class="btn btn-secondary" id="ticketCloseBtn">Close</button>
         <button class="btn btn-primary" id="ticketPrintBtn">Print Boarding Pass</button>
       </div>
@@ -910,7 +912,7 @@ function searchView() {
               <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
                 ${paidPill(b.paid_status)}
                 <button class="btn btn-secondary btn-sm" data-view-ticket="${b.id}">Print Pass</button>
-                <button class="btn btn-whatsapp btn-sm" data-search-wa="${b.id}">💬 WA</button>
+                <button class="btn btn-whatsapp btn-sm" data-search-wa="${b.id}" title="Share via WhatsApp">${WA_ICON_SVG} WhatsApp</button>
                 ${bal > 0 ? `<button class="btn btn-primary btn-sm" data-search-collect="${b.id}" data-due="${bal}">💳 Collect ₹${bal}</button>` : ''}
                 ${(canManage() || roleIs('Supervisor') || b.booked_by_username === state.user.username)
             ? `<button class="btn btn-danger btn-sm" data-cancel-b="${b.id}" data-pnr="${esc(b.pnr)}">Cancel Booking</button>`
@@ -1411,7 +1413,7 @@ function showConfirmModal(data, seats) {
     <p style="font-size:13.5px;color:var(--ink-soft);margin:0 0 14px;">Total: ${fmtMoney(data.totalAmount)} · Paid now: ${fmtMoney(data.amountPaid)} · Balance: ${fmtMoney(Math.max(0, data.totalAmount - data.amountPaid))} · ${esc(data.paidStatus)}</p>
     <div class="table-wrap"><table><thead><tr><th>Seat</th><th>Name</th><th>Age</th><th>Gender</th><th>Phone</th></tr></thead><tbody>${rows}</tbody></table></div>
     <div style="margin-top:18px;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;">
-      <button class="btn btn-whatsapp" id="modalShareWaBtn">💬 Share WhatsApp</button>
+      <button class="btn btn-whatsapp" id="modalShareWaBtn">${WA_ICON_SVG} Share WhatsApp</button>
       <button class="btn btn-secondary" id="modalTicketBtn">Print Boarding Pass</button>
       <button class="btn btn-primary" id="modalOk">Done</button>
     </div>
@@ -1525,7 +1527,7 @@ function renderManifestBody({ trip, seatData, bookings }) {
         <td class="no-print">
           <div style="display:flex;gap:4px;flex-wrap:wrap;">
             <button class="btn btn-secondary btn-sm" data-manifest-ticket="${b.id}" title="Print Boarding Pass">Pass</button>
-            <button class="btn btn-whatsapp btn-sm" data-manifest-wa="${b.id}" title="Share via WhatsApp">💬 WA</button>
+            <button class="btn btn-whatsapp btn-sm" data-manifest-wa="${b.id}" title="Share via WhatsApp">${WA_ICON_SVG} WhatsApp</button>
             ${b.seats.length > 1 && canCancelThis
           ? `<button class="btn btn-danger btn-sm" data-manifest-cancel-seat="${b.id}|${esc(s.seat_label)}" title="Cancel this seat only">Seat</button>`
           : ''}

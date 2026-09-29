@@ -511,8 +511,14 @@ tbody tr:hover{background:var(--ivory);}
   font-weight: 600;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
   box-shadow: 0 1px 3px rgba(37, 211, 102, 0.25);
+  cursor: pointer;
+}
+.btn-whatsapp svg, .btn-whatsapp .wa-icon {
+  fill: #FFFFFF !important;
+  flex-shrink: 0;
 }
 .btn-whatsapp:hover, .btn-whatsapp:active {
   background: #1EBE5D !important;
