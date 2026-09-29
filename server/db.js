@@ -150,6 +150,7 @@ ensureColumn('bookings', 'total_amount', 'REAL NOT NULL DEFAULT 0');
 ensureColumn('bookings', 'paid_status', "TEXT NOT NULL DEFAULT 'Unpaid'");
 ensureColumn('bookings', 'amount_paid', 'REAL NOT NULL DEFAULT 0');
 ensureColumn('bookings', 'pickup_point', 'TEXT');
+ensureColumn('bookings', 'payment_method', "TEXT NOT NULL DEFAULT 'Cash'");
 ensureColumn('booking_seats', 'boarded', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('booking_seats', 'boarded_at', 'TEXT');
 ensureColumn('booking_seats', 'boarded_by', 'TEXT');

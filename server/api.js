@@ -396,7 +396,7 @@ router.get('/trips/:id/seats', requireAuth, (req, res) => {
 
 /* ---------- Bookings ---------- */
 router.post('/bookings', requireAuth, requireAgentOrAdmin, (req, res) => {
-  const { tripId, seats, isGroup, groupContact, paidStatus, amountPaid, pickupPoint } = req.body || {};
+  const { tripId, seats, isGroup, groupContact, paidStatus, amountPaid, pickupPoint, paymentMethod } = req.body || {};
   if (!tripId || !Array.isArray(seats) || seats.length === 0) {
     return res.status(400).json({ error: 'Please select at least one seat.' });
   }
@@ -438,6 +438,7 @@ router.post('/bookings', requireAuth, requireAgentOrAdmin, (req, res) => {
   if (paidStatus === 'Paid' && (amountPaid == null || amountPaid === '')) paidAmt = totalAmount;
   if (paidStatus === 'Unpaid' && amountPaid == null) paidAmt = 0;
   const status = resolvePaidStatus(paidAmt, totalAmount);
+  const method = paymentMethod || 'Cash';
 
   const pnr = 'PNR' + Math.floor(100000 + Math.random() * 900000);
 
@@ -445,11 +446,11 @@ router.post('/bookings', requireAuth, requireAgentOrAdmin, (req, res) => {
   const tx = db.transaction(() => {
     const bookingInfo = db.prepare(`INSERT INTO bookings
       (pnr, trip_id, booked_by, booked_by_username, booked_by_role, is_group, group_contact,
-       fare_per_seat, total_amount, paid_status, amount_paid, pickup_point)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+       fare_per_seat, total_amount, paid_status, amount_paid, pickup_point, payment_method)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       pnr, tripId, req.user.name, req.user.username, req.user.role,
       isGroup ? 1 : 0, isGroup ? sharedContact : null,
-      farePerSeat, totalAmount, status, paidAmt, pickupPoint || null
+      farePerSeat, totalAmount, status, paidAmt, pickupPoint || null, method
     );
     bookingId = bookingInfo.lastInsertRowid;
     const insertSeat = db.prepare(`INSERT INTO booking_seats (booking_id,trip_id,seat_label,passenger_name,age,gender,contact)
@@ -468,6 +469,7 @@ router.post('/bookings', requireAuth, requireAgentOrAdmin, (req, res) => {
       totalAmount,
       amountPaid: paidAmt,
       paidStatus: status,
+      paymentMethod: method,
       pickupPoint
     }, req.user.name, req.user.role);
   } catch (e) {
@@ -480,6 +482,7 @@ router.post('/bookings', requireAuth, requireAgentOrAdmin, (req, res) => {
   res.status(201).json({
     pnr, tripId, seats, bookingId,
     farePerSeat, totalAmount, paidStatus: status, amountPaid: paidAmt,
+    paymentMethod: method,
     pickupPoint: pickupPoint || null,
     bookedBy: { name: req.user.name, username: req.user.username, role: req.user.role },
   });
@@ -614,9 +617,12 @@ router.get('/dashboard/stats', requireAuth, (req, res) => {
 
   const occupancyRate = totalCapacity > 0 ? Math.round((totalBooked / totalCapacity) * 100) : 0;
 
-  // Financials for target date trips
+  // Financials for target date trips with payment breakdown
   const finRow = db.prepare(`
     SELECT COALESCE(SUM(b.amount_paid), 0) AS collected,
+           COALESCE(SUM(CASE WHEN b.payment_method = 'Cash' THEN b.amount_paid ELSE 0 END), 0) AS cash_collected,
+           COALESCE(SUM(CASE WHEN b.payment_method = 'UPI' THEN b.amount_paid ELSE 0 END), 0) AS upi_collected,
+           COALESCE(SUM(CASE WHEN b.payment_method = 'Card' THEN b.amount_paid ELSE 0 END), 0) AS card_collected,
            COALESCE(SUM(CASE WHEN (b.total_amount - b.amount_paid) > 0 THEN (b.total_amount - b.amount_paid) ELSE 0 END), 0) AS due,
            COALESCE(SUM(b.total_amount), 0) AS total_fare
     FROM bookings b
@@ -657,6 +663,9 @@ router.get('/dashboard/stats', requireAuth, (req, res) => {
     availableSeats: Math.max(0, totalCapacity - totalBooked),
     occupancyRate,
     collectedToday: finRow ? finRow.collected : 0,
+    cashCollectedToday: finRow ? finRow.cash_collected : 0,
+    upiCollectedToday: finRow ? finRow.upi_collected : 0,
+    cardCollectedToday: finRow ? finRow.card_collected : 0,
     dueToday: finRow ? finRow.due : 0,
     totalDueAllTime: allTimeDue,
     recentBookings,
@@ -850,8 +859,8 @@ router.post('/bookings/:id/pay-balance', requireAuth, (req, res) => {
   const now = new Date().toISOString();
 
   const tx = db.transaction(() => {
-    db.prepare('UPDATE bookings SET amount_paid = ?, paid_status = ? WHERE id = ?')
-      .run(newPaid, newStatus, req.params.id);
+    db.prepare('UPDATE bookings SET amount_paid = ?, paid_status = ?, payment_method = ? WHERE id = ?')
+      .run(newPaid, newStatus, paymentMethod, req.params.id);
 
     if (markBoarded) {
       db.prepare('UPDATE booking_seats SET boarded = 1, boarded_at = ?, boarded_by = ? WHERE booking_id = ?')

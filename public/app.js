@@ -161,7 +161,7 @@ let bookingCtx = {
   step: 1, tripId: null, trip: null, seatData: null,
   selected: [], pax: {}, mode: 'individual', groupContact: '',
   applyAll: true, lead: { name: '', age: '', gender: '' },
-  advancePaid: '',
+  advancePaid: '', paymentMethod: 'Cash', pickupPoint: '',
 };
 let manifestCtx = { route: '', date: todayStr(), tripId: '', trips: [], tripsLoaded: false, data: null, bookedByFilter: '', groupByAgent: true };
 let adminCtx = { tab: 'routes', tripDate: todayStr(), trips: [], tripsLoaded: false, usersLoaded: false };
@@ -667,7 +667,10 @@ function dashboardView() {
         <div class="stat-card stat-saffron">
           <div class="stat-label">Today's Collections</div>
           <div class="stat-val">${fmtMoney(stats.collectedToday)}</div>
-          <div class="stat-sub">${fmtMoney(stats.dueToday)} pending balance today</div>
+          <div class="stat-sub" style="font-size:11.5px;margin-top:4px;">
+            💵 Cash: <b>${fmtMoney(stats.cashCollectedToday || 0)}</b> · 📱 UPI: <b>${fmtMoney(stats.upiCollectedToday || 0)}</b>${(stats.cardCollectedToday || 0) > 0 ? ' · 💳 Card: <b>' + fmtMoney(stats.cardCollectedToday) + '</b>' : ''}
+          </div>
+          <div class="stat-sub" style="margin-top:2px;">${fmtMoney(stats.dueToday)} pending balance today</div>
         </div>
         <div class="stat-card stat-blue">
           <div class="stat-label">Total Outstanding Dues</div>
@@ -1224,6 +1227,14 @@ function bookingStep2() {
           <div class="summary-box"><span>Fare / seat</span><b>${fmtMoney(fare)}</b></div>
           <div class="summary-box"><span>Total fare</span><b>${fmtMoney(total)}</b></div>
           <div class="field" style="margin-top:12px;">
+            <label>Payment Method</label>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;" id="bookingMethodGroup">
+              <button type="button" class="btn btn-secondary ${(!bookingCtx.paymentMethod || bookingCtx.paymentMethod === 'Cash') ? 'active' : ''}" data-paymethod="Cash">💵 Cash</button>
+              <button type="button" class="btn btn-secondary ${bookingCtx.paymentMethod === 'UPI' ? 'active' : ''}" data-paymethod="UPI">📱 UPI</button>
+              <button type="button" class="btn btn-secondary ${bookingCtx.paymentMethod === 'Card' ? 'active' : ''}" data-paymethod="Card">💳 Card</button>
+            </div>
+          </div>
+          <div class="field" style="margin-top:12px;">
             <label>Advance / amount paid now (₹)</label>
             <input id="advancePaid" type="number" min="0" max="${total}" step="1" value="${esc(bookingCtx.advancePaid)}" placeholder="0 = unpaid, or enter advance">
           </div>
@@ -1300,8 +1311,15 @@ function attachBookingStep2() {
   if (ph) ph.onclick = () => setAdvance(Math.round(totalNow / 2));
   const pf = document.getElementById('payFull');
   if (pf) pf.onclick = () => setAdvance(totalNow);
+  document.querySelectorAll('#bookingMethodGroup [data-paymethod]').forEach((btn) => {
+    btn.onclick = () => {
+      document.querySelectorAll('#bookingMethodGroup [data-paymethod]').forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      bookingCtx.paymentMethod = btn.getAttribute('data-paymethod');
+    };
+  });
   document.getElementById('cancelBtn').onclick = () => {
-    bookingCtx = { step: 1, tripId: null, selected: [], pax: {}, mode: 'individual', groupContact: '', applyAll: true, lead: { name: '', age: '', gender: '' }, advancePaid: '' };
+    bookingCtx = { step: 1, tripId: null, selected: [], pax: {}, mode: 'individual', groupContact: '', applyAll: true, lead: { name: '', age: '', gender: '' }, advancePaid: '', paymentMethod: 'Cash', pickupPoint: '' };
     nav('#/booking');
   };
   document.getElementById('confirmBtn').onclick = confirmBooking;
@@ -1361,6 +1379,7 @@ async function confirmBooking() {
         groupContact: bookingCtx.groupContact,
         amountPaid,
         pickupPoint: bookingCtx.pickupPoint || null,
+        paymentMethod: bookingCtx.paymentMethod || 'Cash',
       }),
     });
     showConfirmModal(data, seats);
@@ -1418,7 +1437,7 @@ function showConfirmModal(data, seats) {
 
   document.getElementById('modalOk').onclick = () => {
     div.remove();
-    bookingCtx = { step: 1, tripId: null, selected: [], pax: {}, mode: 'individual', groupContact: '', applyAll: true, lead: { name: '', age: '', gender: '' }, advancePaid: '', pickupPoint: '' };
+    bookingCtx = { step: 1, tripId: null, selected: [], pax: {}, mode: 'individual', groupContact: '', applyAll: true, lead: { name: '', age: '', gender: '' }, advancePaid: '', paymentMethod: 'Cash', pickupPoint: '' };
     dashboardCtx.loaded = false;
     nav('#/dashboard');
   };
@@ -1551,6 +1570,9 @@ function renderManifestBody({ trip, seatData, bookings }) {
   }
 
   const collected = bookings.reduce((n, b) => n + Number(b.amount_paid || 0), 0);
+  const cashCollected = bookings.filter((b) => !b.payment_method || b.payment_method === 'Cash').reduce((n, b) => n + Number(b.amount_paid || 0), 0);
+  const upiCollected = bookings.filter((b) => b.payment_method === 'UPI').reduce((n, b) => n + Number(b.amount_paid || 0), 0);
+  const cardCollected = bookings.filter((b) => b.payment_method === 'Card').reduce((n, b) => n + Number(b.amount_paid || 0), 0);
   const due = bookings.reduce((n, b) => n + Math.max(0, Number(b.total_amount || 0) - Number(b.amount_paid || 0)), 0);
 
   return `
@@ -1563,7 +1585,8 @@ function renderManifestBody({ trip, seatData, bookings }) {
       <span><b>${esc(trip.route_name)}</b></span><span>${esc(trip.bus_name)}</span><span>${fmtDate(trip.date)}, ${esc(trip.time)}</span>
       <span>Total Seats: ${total}</span><span>Booked: ${totalBookedSeats}</span><span>Available: ${total - totalBookedSeats}</span>
       <span>Boarded: <b>${boardedCount} / ${totalBookedSeats}</b> (${pctBoarded}%)</span>
-      <span>Collected: ${fmtMoney(collected)}</span><span>Due: ${fmtMoney(due)}</span>
+      <span>Collected: <b>${fmtMoney(collected)}</b> <span class="muted" style="font-size:11.5px;">(Cash: <b>${fmtMoney(cashCollected)}</b> · UPI: <b>${fmtMoney(upiCollected)}</b>${cardCollected > 0 ? ' · Card: <b>' + fmtMoney(cardCollected) + '</b>' : ''})</span></span>
+      <span>Due: ${fmtMoney(due)}</span>
     </div>
     <div class="boarding-progress-bar no-print">
       <div class="boarding-progress-fill" style="width:${pctBoarded}%"></div>
@@ -1812,15 +1835,9 @@ function openSpotPaymentModal(booking, trip, defaultDue, passengerName, onComple
         <label>Payment Mode</label>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;" id="spotMethodGroup">
           <button type="button" class="btn btn-secondary active" data-method="Cash">💵 Cash</button>
-          <button type="button" class="btn btn-secondary" data-method="UPI">📱 UPI QR</button>
+          <button type="button" class="btn btn-secondary" data-method="UPI">📱 UPI</button>
           <button type="button" class="btn btn-secondary" data-method="Card">💳 Card</button>
         </div>
-      </div>
-
-      <div id="spotUpiContainer" class="upi-qr-container hidden">
-        <div style="font-size:12px;font-weight:600;margin-bottom:8px;color:#1E293B;">Scan with Google Pay, PhonePe, Paytm, BHIM</div>
-        <div id="spotUpiQrBox" class="upi-qr-img"></div>
-        <div id="spotUpiAmtDisplay" style="font-size:12px;font-weight:600;color:#0F172A;margin-top:4px;">Amount: ₹${initialDue}</div>
       </div>
 
       <label class="checkline" style="margin:14px 0 18px;background:#F1F5F9;padding:8px 10px;border-radius:6px;">
@@ -1838,47 +1855,16 @@ function openSpotPaymentModal(booking, trip, defaultDue, passengerName, onComple
   document.body.appendChild(div);
 
   const amountInput = div.querySelector('#spotPayAmount');
-  const upiContainer = div.querySelector('#spotUpiContainer');
-  const upiQrBox = div.querySelector('#spotUpiQrBox');
-  const upiAmtDisplay = div.querySelector('#spotUpiAmtDisplay');
   const errBanner = div.querySelector('#spotPayErr');
   const submitBtn = div.querySelector('#spotPaySubmit');
-
-  function renderUpiQr() {
-    if (selectedMethod !== 'UPI') return;
-    const amt = Number(amountInput.value) || 0;
-    upiAmtDisplay.textContent = `Amount: ₹${amt}`;
-    upiQrBox.innerHTML = '';
-    const upiUri = `upi://pay?pa=sevabus@upi&pn=SevaBus&am=${amt}&tr=${booking.pnr}&cu=INR`;
-    if (window.QRCode) {
-      new QRCode(upiQrBox, {
-        text: upiUri,
-        width: 140,
-        height: 140,
-        colorDark: '#0F172A',
-        colorLight: '#FFFFFF',
-        correctLevel: QRCode.CorrectLevel.M
-      });
-    }
-  }
 
   div.querySelectorAll('#spotMethodGroup button').forEach((btn) => {
     btn.onclick = () => {
       div.querySelectorAll('#spotMethodGroup button').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
       selectedMethod = btn.getAttribute('data-method');
-      if (selectedMethod === 'UPI') {
-        upiContainer.classList.remove('hidden');
-        renderUpiQr();
-      } else {
-        upiContainer.classList.add('hidden');
-      }
     };
   });
-
-  amountInput.oninput = () => {
-    if (selectedMethod === 'UPI') renderUpiQr();
-  };
 
   div.querySelector('#spotPayCancel').onclick = () => div.remove();
 
