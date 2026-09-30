@@ -657,17 +657,17 @@ function dashboardView() {
     metricsHtml = `
       <div class="stats-grid">
         <div class="stat-card">
-          <div class="stat-label">Today's Scheduled Trips</div>
+          <div class="stat-label">🚌 Scheduled Trips</div>
           <div class="stat-val">${stats.tripsCount}</div>
           <div class="stat-sub">${stats.plannedCount} Planned · ${stats.inTransitCount} In-Transit · ${stats.completedCount} Done</div>
         </div>
         <div class="stat-card stat-teal">
-          <div class="stat-label">Today's Occupancy</div>
+          <div class="stat-label">📊 Today's Occupancy</div>
           <div class="stat-val">${stats.occupancyRate}%</div>
           <div class="stat-sub">${stats.totalBooked} booked / ${stats.totalCapacity} capacity (${stats.availableSeats} open)</div>
         </div>
         <div class="stat-card stat-saffron">
-          <div class="stat-label">Today's Collections</div>
+          <div class="stat-label">💰 Today's Collections</div>
           <div class="stat-val">${fmtMoney(stats.collectedToday)}</div>
           <div class="stat-sub" style="font-size:11.5px;margin-top:4px;">
             💵 Cash: <b>${fmtMoney(stats.cashCollectedToday || 0)}</b> · 📱 UPI: <b>${fmtMoney(stats.upiCollectedToday || 0)}</b>${(stats.cardCollectedToday || 0) > 0 ? ' · 💳 Card: <b>' + fmtMoney(stats.cardCollectedToday) + '</b>' : ''}
@@ -675,7 +675,7 @@ function dashboardView() {
           <div class="stat-sub" style="margin-top:2px;">${fmtMoney(stats.dueToday)} pending balance today</div>
         </div>
         <div class="stat-card stat-blue">
-          <div class="stat-label">Total Outstanding Dues</div>
+          <div class="stat-label">⏳ Total Outstanding Dues</div>
           <div class="stat-val">${fmtMoney(stats.totalDueAllTime)}</div>
           <div class="stat-sub">Across all active scheduled trips</div>
         </div>
@@ -1111,7 +1111,19 @@ function seatMapHtml(grid, booked, selected, interactive) {
     if (!interactive) return `<div class="seat seat-avail">${esc(lab)}</div>`;
     return `<div class="seat ${isSel ? 'seat-sel' : 'seat-avail'}" data-seat="${esc(lab)}">${esc(lab)}</div>`;
   }).join('')).join('');
-  return `<div class="seatmap-wrap"><div class="seatmap" style="grid-template-columns:repeat(${width},44px)">${cells}</div></div>`;
+  return `
+    <div class="bus-cabin-frame">
+      <div class="bus-cabin-front">
+        <span>FRONT</span>
+        <span style="display:inline-flex;align-items:center;gap:4px;">🛞 Driver Cabin</span>
+        <span>🚪 Entry</span>
+      </div>
+      <div class="seatmap-wrap"><div class="seatmap" style="grid-template-columns:repeat(${width},46px)">${cells}</div></div>
+      <div class="bus-cabin-rear">
+        <span>BACK / REAR</span>
+      </div>
+    </div>
+  `;
 }
 
 function bookingStep2() {
@@ -1606,10 +1618,22 @@ function renderManifestBody({ trip, seatData, bookings }) {
     </div>
     <div class="booking-grid print-stack">
       <div class="panel"><h3>Seat Map</h3>
-        <div class="seatmap" style="grid-template-columns:repeat(${width},40px)">${seatCells}</div>
+        <div class="bus-cabin-frame" style="margin-bottom:12px;">
+          <div class="bus-cabin-front">
+            <span>FRONT</span>
+            <span style="display:inline-flex;align-items:center;gap:4px;">🛞 Driver Cabin</span>
+            <span>🚪 Entry</span>
+          </div>
+          <div class="seatmap-wrap">
+            <div class="seatmap" style="grid-template-columns:repeat(${width},46px)">${seatCells}</div>
+          </div>
+          <div class="bus-cabin-rear">
+            <span>BACK / REAR</span>
+          </div>
+        </div>
         <div class="legend no-print">
-          <span><span class="dot" style="background:var(--seat-avail-bg);border:1.5px solid var(--seat-avail);"></span>Available</span>
-          <span><span class="dot" style="background:var(--seat-booked-bg);border:1.5px solid var(--seat-booked);"></span>Booked</span>
+          <span><span class="dot" style="background:#FFFFFF;border:1.5px solid #A7F3D0;"></span>Available</span>
+          <span><span class="dot" style="background:#FEE2E2;border:1.5px solid #FECACA;"></span>Booked</span>
         </div>
       </div>
       <div class="panel"><h3>Passenger List ${manifestCtx.groupByAgent && !manifestCtx.bookedByFilter ? '(by staff)' : ''}</h3>
