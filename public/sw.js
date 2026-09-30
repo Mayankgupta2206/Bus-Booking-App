@@ -1,9 +1,9 @@
-const CACHE_NAME = 'seva-bus-v8';
+const CACHE_NAME = 'seva-bus-v7';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
-  '/style.css?v=4',
-  '/app.js?v=7',
+  '/style.css?v=3',
+  '/app.js?v=6',
   '/jsqr.js',
   '/qrcode.min.js',
   '/manifest.json',
