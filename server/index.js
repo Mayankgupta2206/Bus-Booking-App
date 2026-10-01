@@ -23,6 +23,11 @@ app.use(express.static(path.join(__dirname, '..', 'public'), {
 app.use(express.json());
 app.use('/api', api);
 
+// Dedicated Standalone Passenger Ticket Route (no staff code exposed)
+app.get('/ticket', (req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'public', 'ticket.html'));
+});
+
 // SPA fallback so refreshing on any client-side route still loads the app
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));

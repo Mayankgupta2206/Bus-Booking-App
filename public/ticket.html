@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#7C1A22">
+<title>Passenger Boarding Pass | Seva Bus Service</title>
+<link rel="icon" type="image/png" href="/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Spectral:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --maroon: #7C1A22;
+  --maroon-dark: #5A1218;
+  --saffron: #D97706;
+  --ivory: #FDFBF7;
+  --bg-page: #F4F1EA;
+  --card: #FFFFFF;
+  --ink: #1E293B;
+  --ink-soft: #64748B;
+  --line: #E2E8F0;
+  --ok: #15803D;
+  --err: #B91C1C;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg-page);
+  color: var(--ink);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 24px 14px 40px;
+}
+
+.ticket-container {
+  width: 100%;
+  max-width: 520px;
+  margin: 0 auto;
+}
+
+.ticket-wrap {
+  background: var(--card);
+  border: 2px dashed #CBD5E1;
+  border-radius: 12px;
+  padding: 24px;
+  position: relative;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+}
+
+.ticket-head {
+  text-align: center;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 14px;
+  margin-bottom: 14px;
+}
+
+.ticket-badge {
+  display: inline-block;
+  background: var(--maroon);
+  color: #fff;
+  font-family: 'Spectral', serif;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 4px;
+  letter-spacing: 0.05em;
+  margin-bottom: 6px;
+}
+
+.ticket-title {
+  margin: 4px 0 2px;
+  font-family: 'Spectral', Georgia, serif;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+}
+
+.ticket-pnr-line {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 14px;
+  color: var(--ink-soft);
+}
+.ticket-pnr-line b {
+  color: var(--ink);
+  letter-spacing: 0.04em;
+}
+
+.ticket-stamp {
+  position: absolute;
+  right: 20px;
+  top: 20px;
+  border: 2px solid;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  transform: rotate(-6deg);
+}
+.stamp-paid { color: var(--ok); border-color: var(--ok); background: #DCFCE7; }
+.stamp-partial { color: var(--saffron); border-color: var(--saffron); background: #FEF3C7; }
+.stamp-unpaid { color: var(--err); border-color: var(--err); background: #FEE2E2; }
+
+.ticket-meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  background: var(--ivory);
+  border: 1px solid var(--line);
+  padding: 12px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  margin-bottom: 14px;
+}
+.ticket-meta div b { color: var(--ink); }
+
+.table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  margin-bottom: 12px;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+th, td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+}
+th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-soft);
+  background: #F8FAFC;
+}
+
+.summary-box {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--ivory);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 13px;
+  margin-top: 6px;
+}
+
+.ticket-qr-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--line);
+  gap: 14px;
+}
+.ticket-qr-box {
+  background: #FFFFFF;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.ticket-qr-box img, .ticket-qr-box canvas { display: block; }
+
+.actions-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 16px;
+  gap: 10px;
+}
+
+.btn-print {
+  background: #FFFFFF;
+  border: 1px solid var(--line);
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--ink);
+  transition: all 0.15s;
+}
+.btn-print:hover {
+  background: #F1F5F9;
+  border-color: #CBD5E1;
+}
+
+.search-box-card {
+  background: #FFFFFF;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  padding: 24px;
+  text-align: center;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.05);
+}
+.search-input {
+  width: 100%;
+  max-width: 280px;
+  padding: 10px 14px;
+  font-size: 15px;
+  font-family: 'IBM Plex Mono', monospace;
+  text-transform: uppercase;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  text-align: center;
+  outline: none;
+  margin: 12px 0;
+}
+.search-input:focus {
+  border-color: var(--maroon);
+}
+.btn-search {
+  background: var(--maroon);
+  color: #FFFFFF;
+  border: none;
+  padding: 10px 20px;
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.spin {
+  display: inline-block;
+  width: 24px;
+  height: 24px;
+  border: 3px solid rgba(124, 26, 34, 0.2);
+  border-top-color: var(--maroon);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media print {
+  body { background: #FFFFFF; padding: 0; }
+  .no-print { display: none !important; }
+  .ticket-wrap { border: 1px solid #000; box-shadow: none; max-width: 100%; }
+}
+</style>
+</head>
+<body>
+
+<div class="ticket-container" id="ticketApp">
+  <div style="text-align:center;padding:40px 0;">
+    <span class="spin"></span>
+    <div style="font-size:13px;color:var(--ink-soft);margin-top:10px;">Loading Passenger Boarding Pass…</div>
+  </div>
+</div>
+
+<script src="/qrcode.min.js"></script>
+<script>
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function fmtDate(s) {
+  if (!s) return '—';
+  try {
+    return new Date(s + 'T00:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+  } catch (e) { return s; }
+}
+function fmtMoney(n) {
+  return '₹' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+}
+
+async function loadTicket() {
+  const container = document.getElementById('ticketApp');
+  const params = new URLSearchParams(window.location.search);
+  const pnr = (params.get('pnr') || '').trim().toUpperCase();
+
+  if (!pnr) {
+    renderSearchForm(container, 'Please enter your booking PNR to view your Boarding Pass.');
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/public/pass/' + encodeURIComponent(pnr));
+    let data = null;
+    try { data = await res.json(); } catch (e) {}
+
+    if (!res.ok) {
+      throw new Error((data && data.error) || 'No active Boarding Pass found for PNR ' + pnr);
+    }
+
+    renderBoardingPass(container, data);
+  } catch (err) {
+    renderSearchForm(container, err.message);
+  }
+}
+
+function renderSearchForm(container, message) {
+  container.innerHTML = `
+    <div class="search-box-card">
+      <div class="ticket-badge">SEVA BUS SERVICE</div>
+      <h2 style="font-family:'Spectral',serif;font-size:22px;margin:8px 0 4px;">Find Your Boarding Pass</h2>
+      <p style="font-size:13px;color:var(--ink-soft);margin-bottom:12px;">${esc(message)}</p>
+      <form onsubmit="handleSearch(event)">
+        <input type="text" id="pnrInput" class="search-input" placeholder="e.g. PNR450574" required maxlength="12">
+        <br>
+        <button type="submit" class="btn-search">View Boarding Pass</button>
+      </form>
+    </div>
+  `;
+}
+
+function handleSearch(e) {
+  e.preventDefault();
+  const val = document.getElementById('pnrInput').value.trim().toUpperCase();
+  if (val) {
+    window.location.search = '?pnr=' + encodeURIComponent(val);
+  }
+}
+
+function renderBoardingPass(container, b) {
+  const seats = b.seats || [];
+  const seatListStr = seats.map(s => s.seat_label).join(', ');
+  const bal = Math.max(0, Number(b.total_amount || 0) - Number(b.amount_paid || 0));
+  const stampClass = b.paid_status === 'Paid' ? 'stamp-paid' : b.paid_status === 'Partial' ? 'stamp-partial' : 'stamp-unpaid';
+
+  const rows = seats.map(s => `
+    <tr>
+      <td><b>${esc(s.seat_label)}</b></td>
+      <td>${esc(s.passenger_name || 'Passenger')}</td>
+      <td>${esc(s.age || '—')} / ${esc(s.gender || '—')}</td>
+      <td>${s.boarded ? '<span style="color:var(--ok);font-weight:600;">✓ Boarded</span>' : '<span style="color:var(--ink-soft);">Confirmed</span>'}</td>
+    </tr>
+  `).join('');
+
+  container.innerHTML = `
+    <div class="ticket-wrap">
+      <div class="ticket-stamp ${stampClass}">${esc(b.paid_status)}</div>
+      
+      <div class="ticket-head">
+        <div class="ticket-badge">SEVA BUS SERVICE</div>
+        <h1 class="ticket-title">PASSENGER BOARDING PASS</h1>
+        <div class="ticket-pnr-line">PNR: <b>${esc(b.pnr)}</b></div>
+      </div>
+
+      <div class="ticket-meta">
+        <div><b>Route:</b> ${esc(b.route_name || (b.source + ' ➔ ' + b.destination))}</div>
+        <div><b>Bus:</b> ${esc(b.bus_name || 'Seva Express')}</div>
+        <div><b>Date:</b> ${fmtDate(b.trip_date)}</div>
+        <div><b>Departure:</b> ${esc(b.trip_time)}</div>
+        <div><b>Seats (${seats.length}):</b> <span style="font-family:'IBM Plex Mono',monospace;font-weight:600;color:var(--maroon);">${esc(seatListStr)}</span></div>
+        <div><b>Status:</b> <b>${esc(b.paid_status)}</b></div>
+        ${b.pickup_point ? `<div style="grid-column:span 2;"><b>Pickup Stop:</b> 📍 ${esc(b.pickup_point)}</div>` : ''}
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Seat</th><th>Passenger</th><th>Age/Gender</th><th>Status</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+
+      <div class="summary-box">
+        <span>Total Fare: <b>${fmtMoney(b.total_amount)}</b> · Paid: <b>${fmtMoney(b.amount_paid)}</b></span>
+        <span>Balance Due: <b style="color:${bal > 0 ? 'var(--err)' : 'var(--ok)'};">${fmtMoney(bal)}</b></span>
+      </div>
+
+      <div class="ticket-qr-wrap">
+        <div id="ticketQr" class="ticket-qr-box"></div>
+        <div style="font-size:11.5px;color:var(--ink-soft);text-align:right;">
+          <b>Show this QR code at boarding</b><br>
+          Conductor will scan to verify ticket<br>
+          <b style="color:var(--ink);font-family:'IBM Plex Mono',monospace;">PNR: ${esc(b.pnr)}</b>
+        </div>
+      </div>
+    </div>
+
+    <div class="actions-bar no-print">
+      <button class="btn-print" onclick="window.print()">🖨️ Print / Save PDF</button>
+      <span style="font-size:12px;color:var(--ink-soft);">Official Seva Bus E-Ticket</span>
+    </div>
+  `;
+
+  if (window.QRCode && document.getElementById('ticketQr')) {
+    try {
+      new QRCode(document.getElementById('ticketQr'), {
+        text: `SEVA-BUS|PNR:${b.pnr}|SEATS:${seatListStr}|FARE:${b.total_amount}|STATUS:${b.paid_status}`,
+        width: 88,
+        height: 88,
+        colorDark: '#1E293B',
+        colorLight: '#FFFFFF',
+        correctLevel: QRCode.CorrectLevel.M
+      });
+    } catch (e) {
+      console.warn('QR error:', e);
+    }
+  }
+}
+
+document.addEventListener('DOMContentLoaded', loadTicket);
+</script>
+
+</body>
+</html>

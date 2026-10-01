@@ -6,6 +6,10 @@
       "destination": "/api/index.js"
     },
     {
+      "source": "/ticket",
+      "destination": "/public/ticket.html"
+    },
+    {
       "source": "/(.*)",
       "destination": "/public/$1"
     }

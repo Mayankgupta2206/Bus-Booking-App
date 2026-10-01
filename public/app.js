@@ -479,7 +479,7 @@ function shareTicketWhatsapp(booking, trip) {
     }).join('\n')
     : `• *Seat(s):* ${seatListStr}`;
 
-  const passUrl = `${window.location.origin}/#/pass/${encodeURIComponent(pnr)}`;
+  const passUrl = `${window.location.origin}/ticket?pnr=${encodeURIComponent(pnr)}`;
 
   const lines = [
     '═══════════════════════════',
