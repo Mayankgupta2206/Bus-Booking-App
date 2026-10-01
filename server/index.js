@@ -22,6 +22,7 @@ app.use(express.static(path.join(__dirname, '..', 'public'), {
 }));
 app.use(express.json());
 app.use('/api', api);
+app.use(api);
 
 // Dedicated Standalone Passenger Ticket Route (no staff code exposed)
 app.get('/ticket', (req, res) => {

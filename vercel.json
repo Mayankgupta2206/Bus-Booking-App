@@ -1,5 +1,6 @@
 {
   "version": 2,
+  "cleanUrls": true,
   "rewrites": [
     {
       "source": "/api/(.*)",
@@ -7,11 +8,7 @@
     },
     {
       "source": "/ticket",
-      "destination": "/public/ticket.html"
-    },
-    {
-      "source": "/(.*)",
-      "destination": "/public/$1"
+      "destination": "/ticket.html"
     }
   ]
 }
