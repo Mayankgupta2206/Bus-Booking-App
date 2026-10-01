@@ -581,19 +581,31 @@ function shareTicketWhatsapp(booking, trip) {
 async function renderPublicPass() {
   const app = document.getElementById('app');
   const hash = window.location.hash || state.route || '';
-  const pnr = hash.replace('#/pass/', '').trim().toUpperCase();
+  const query = hash.replace('#/pass/', '').trim();
 
-  if (!pnr) {
+  if (!query || query === '#/pass') {
     app.innerHTML = `
       <div class="center-shell">
-        <div class="login-card" style="text-align:center;">
+        <div class="login-card" style="text-align:center;max-width:380px;">
           <div class="login-mark">S</div>
-          <h2>Boarding Pass Lookup</h2>
-          <p style="font-size:13px;color:var(--ink-soft);margin:10px 0 16px;">Please provide a valid booking PNR number.</p>
-          <a href="#/login" class="btn btn-secondary">Go to Login</a>
+          <h2>Find Boarding Pass</h2>
+          <p style="font-size:13px;color:var(--ink-soft);margin:10px 0 16px;">Enter your booking PNR (e.g. PNR488408) or 10-digit mobile number.</p>
+          <div style="display:flex;gap:6px;margin-bottom:12px;">
+            <input type="text" id="publicPassLookupInput" placeholder="e.g. PNR488408 or 9876543210" style="flex:1;font-family:'IBM Plex Mono',monospace;padding:8px 12px;border:1px solid var(--line);border-radius:6px;">
+            <button class="btn btn-primary" id="publicPassLookupBtn">Search</button>
+          </div>
+          ${isPassengerPortalMode ? '' : '<a href="#/login" class="btn btn-secondary btn-sm" style="display:inline-block;margin-top:6px;">Go to Staff Login</a>'}
         </div>
       </div>
     `;
+    const inp = app.querySelector('#publicPassLookupInput');
+    const btn = app.querySelector('#publicPassLookupBtn');
+    const doLookup = () => {
+      const v = (inp.value || '').trim();
+      if (v) nav('#/pass/' + encodeURIComponent(v));
+    };
+    if (btn) btn.onclick = doLookup;
+    if (inp) inp.onkeydown = (e) => { if (e.key === 'Enter') doLookup(); };
     return;
   }
 
@@ -601,16 +613,67 @@ async function renderPublicPass() {
     <div style="min-height:100vh;background:var(--ivory);padding:24px 16px;display:flex;flex-direction:column;align-items:center;justify-content:center;">
       <div style="text-align:center;margin-bottom:16px;">
         <span class="spin" style="width:24px;height:24px;border-width:3px;"></span>
-        <div style="font-size:13px;color:var(--ink-soft);margin-top:8px;">Loading Digital Boarding Pass…</div>
+        <div style="font-size:13px;color:var(--ink-soft);margin-top:8px;">Finding Boarding Pass for ${esc(query)}…</div>
       </div>
     </div>
   `;
 
   try {
-    const res = await fetch('/api/public/pass/' + encodeURIComponent(pnr));
+    const res = await fetch('/api/public/pass/' + encodeURIComponent(query));
     let data = null;
     try { data = await res.json(); } catch {}
-    if (!res.ok) throw new Error((data && data.error) || 'Boarding Pass not found for PNR ' + pnr);
+    if (!res.ok) throw new Error((data && data.error) || 'Boarding Pass not found for ' + query);
+
+    if (data.multiple) {
+      const bookings = data.bookings || [];
+      const cardsHtml = bookings.map((b) => {
+        const seats = b.seats || [];
+        const seatStr = seats.map((s) => s.seat_label).join(', ');
+        return `
+          <div style="background:#FAF8F5;border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:12px;display:flex;flex-direction:column;gap:8px;">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+              <div>
+                <div style="font-weight:700;font-size:15px;color:var(--ink);">${esc(b.route_name || (b.source + ' ➔ ' + b.destination))}</div>
+                <div style="font-size:12.5px;color:var(--ink-soft);margin-top:2px;">🚌 ${esc(b.bus_name || 'Seva Express')}</div>
+              </div>
+              <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:700;background:#FFFFFF;border:1px solid var(--line);padding:3px 8px;border-radius:4px;color:var(--maroon);">
+                ${esc(b.pnr)}
+              </span>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;color:var(--ink);background:#FFFFFF;padding:8px 10px;border-radius:6px;border:1px solid #ECECEC;">
+              <div>📅 <b>Date:</b> ${fmtDate(b.trip_date)}</div>
+              <div>⏰ <b>Time:</b> ${esc(b.trip_time)}</div>
+              <div>💺 <b>Seats:</b> <b style="color:var(--maroon);">${esc(seatStr)}</b></div>
+              <div>💳 <b>Status:</b> <b>${esc(b.paid_status)}</b></div>
+            </div>
+            <div style="display:flex;justify-content:flex-end;margin-top:4px;">
+              <a href="#/pass/${encodeURIComponent(b.pnr)}" class="btn btn-primary btn-sm" style="text-decoration:none;">
+                View Boarding Pass ➔
+              </a>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      app.innerHTML = `
+        <div style="min-height:100vh;background:#F8F6F0;padding:24px 16px;box-sizing:border-box;">
+          <div style="max-width:540px;margin:0 auto;">
+            <div class="panel" style="text-align:left;padding:20px;">
+              <div style="text-align:center;margin-bottom:16px;">
+                <div class="ticket-badge">SEVA BUS SERVICE</div>
+                <h2 style="font-size:22px;margin:8px 0 4px;">Select Your Trip Pass</h2>
+                <p style="font-size:13px;color:var(--ink-soft);">Found <b>${data.count} bookings</b> matching <b>${esc(data.query)}</b></p>
+              </div>
+              ${cardsHtml}
+              <div style="text-align:center;margin-top:16px;">
+                <a href="#/pass" class="btn btn-secondary btn-sm" style="text-decoration:none;">🔍 Search Another Number / PNR</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+      return;
+    }
 
     const b = data;
     const seats = b.seats || [];
@@ -674,7 +737,7 @@ async function renderPublicPass() {
 
           <div class="no-print" style="margin-top:16px;display:flex;justify-content:space-between;align-items:center;gap:10px;">
             <button class="btn btn-secondary btn-sm" onclick="window.print()">🖨️ Print Pass / Save PDF</button>
-            <span style="font-size:12px;color:var(--ink-soft);">Official Seva Bus E-Ticket</span>
+            <a href="#/pass" class="btn btn-secondary btn-sm" style="text-decoration:none;">🔍 Search Another Pass</a>
           </div>
         </div>
       </div>
@@ -699,7 +762,10 @@ async function renderPublicPass() {
           <div style="font-size:36px;margin-bottom:8px;">🎫</div>
           <h3 style="color:var(--err);margin-bottom:8px;">Boarding Pass Not Found</h3>
           <p style="font-size:13px;color:var(--ink-soft);margin-bottom:18px;">${esc(err.message)}</p>
-          <div style="font-size:12px;color:var(--ink-soft);">Please check your PNR number or contact Seva Bus support.</div>
+          <div style="margin-bottom:16px;">
+            <a href="#/pass" class="btn btn-primary btn-sm" style="text-decoration:none;">Search Again</a>
+          </div>
+          <div style="font-size:12px;color:var(--ink-soft);">Please check your PNR number or mobile number, or contact Seva Bus support.</div>
         </div>
       </div>
     `;
@@ -2024,9 +2090,9 @@ function openTicketScannerModal(reloadManifest) {
       </div>
 
       <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--line);text-align:left;">
-        <label style="font-size:11.5px;font-weight:600;color:var(--ink-soft);">Or Enter PNR Manually</label>
+        <label style="font-size:11.5px;font-weight:600;color:var(--ink-soft);">Or Enter PNR or Mobile Number Manually</label>
         <div style="display:flex;gap:6px;margin-top:4px;">
-          <input type="text" id="manualPnrInput" placeholder="e.g. PNR712019" style="font-family:'IBM Plex Mono',monospace;text-transform:uppercase;">
+          <input type="text" id="manualPnrInput" placeholder="e.g. PNR712019 or 9876543210" style="font-family:'IBM Plex Mono',monospace;">
           <button class="btn btn-secondary btn-sm" id="manualPnrBtn">Verify & Board</button>
         </div>
       </div>
@@ -2200,36 +2266,57 @@ function openTicketScannerModal(reloadManifest) {
       try { navigator.vibrate(100); } catch (e) {}
     }
 
-    const pnrMatch = rawText.match(/PNR\d{6}/i);
-    const pnr = pnrMatch ? pnrMatch[0].toUpperCase() : null;
-
-    if (!pnr) {
-      playScanSound(false);
-      resultArea.innerHTML = `
-        <div class="scan-result-card scan-result-err">
-          <b>❌ Unrecognized QR Code</b>
-          <div style="font-size:12px;margin-top:2px;">No valid Seva Bus PNR found in scanned code.</div>
-          <button class="btn btn-secondary btn-sm" id="rescanBtn" style="margin-top:6px;">Scan Again</button>
-        </div>
-      `;
-      div.querySelector('#rescanBtn').onclick = resumeScanning;
-      return;
-    }
+    const trimmed = String(rawText || '').trim();
+    const pnrMatch = trimmed.match(/PNR\d{6}/i);
+    let pnr = pnrMatch ? pnrMatch[0].toUpperCase() : null;
+    const cleanDigits = trimmed.replace(/\D/g, '');
 
     const currentBookings = manifestCtx.data?.bookings || [];
-    const b = currentBookings.find((x) => x.pnr.toUpperCase() === pnr);
+    let b = null;
+
+    if (pnr) {
+      b = currentBookings.find((x) => x.pnr.toUpperCase() === pnr);
+    } else if (cleanDigits.length >= 6 && /^\d{6}$/.test(cleanDigits)) {
+      pnr = 'PNR' + cleanDigits;
+      b = currentBookings.find((x) => x.pnr.toUpperCase() === pnr);
+    }
+
+    if (!b && cleanDigits.length >= 4) {
+      const phoneSuffix = cleanDigits.length >= 10 ? cleanDigits.slice(-10) : cleanDigits;
+      b = currentBookings.find((x) => {
+        if (x.group_contact && String(x.group_contact).replace(/\D/g, '').includes(phoneSuffix)) return true;
+        if (Array.isArray(x.seats) && x.seats.some((s) => s.contact && String(s.contact).replace(/\D/g, '').includes(phoneSuffix))) return true;
+        return false;
+      });
+      if (b) {
+        pnr = b.pnr;
+      }
+    }
 
     if (!b) {
+      if (!pnr && cleanDigits.length < 4) {
+        playScanSound(false);
+        resultArea.innerHTML = `
+          <div class="scan-result-card scan-result-err">
+            <b>❌ Unrecognized Input / QR Code</b>
+            <div style="font-size:12px;margin-top:2px;">Please enter a valid PNR (e.g. PNR712019) or passenger mobile number.</div>
+            <button class="btn btn-secondary btn-sm" id="rescanBtn" style="margin-top:6px;">Scan Again</button>
+          </div>
+        `;
+        div.querySelector('#rescanBtn').onclick = resumeScanning;
+        return;
+      }
+
       playScanSound(false);
       resultArea.innerHTML = `
         <div class="scan-result-card scan-result-warn">
           <b>⚠️ Ticket Not on this Trip</b>
           <div style="font-size:12px;margin-top:3px;">
-            PNR <b>${esc(pnr)}</b> is not booked on this specific bus/manifest.
+            Booking <b>${esc(pnr || trimmed)}</b> is not booked on this specific bus/manifest.
           </div>
           <div style="margin-top:8px;display:flex;gap:6px;justify-content:center;">
             <button class="btn btn-secondary btn-sm" id="rescanBtn">Scan Next</button>
-            <a class="btn btn-primary btn-sm" href="#/search?q=${encodeURIComponent(pnr)}" target="_blank" style="text-decoration:none;">Search PNR ↗</a>
+            <a class="btn btn-primary btn-sm" href="#/search?q=${encodeURIComponent(pnr || trimmed)}" target="_blank" style="text-decoration:none;">Search Global ↗</a>
           </div>
         </div>
       `;

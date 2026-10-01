@@ -634,12 +634,15 @@ router.get('/bookings/search', requireAuth, (req, res) => {
   res.json({ bookings: withSeats, cancelled });
 });
 
-/* ---------- Public Pass Lookup (No auth required for passengers) ---------- */
-router.get('/public/pass/:pnr', (req, res) => {
-  const pnr = String(req.params.pnr || '').trim().toUpperCase();
-  if (!pnr) return res.status(400).json({ error: 'PNR is required.' });
+/* ---------- Public Pass Lookup (Search by PNR or Mobile Number - No auth required for passengers) ---------- */
+router.get(['/public/pass', '/public/pass/:pnr'], (req, res) => {
+  const raw = String(req.params.pnr || req.query.pnr || req.query.phone || req.query.q || '').trim();
+  if (!raw) return res.status(400).json({ error: 'PNR or Mobile number is required.' });
 
-  const b = db.prepare(`
+  const upper = raw.toUpperCase();
+  const digits = raw.replace(/\D/g, '');
+
+  const bookingSelectSql = `
     SELECT b.id, b.pnr, b.trip_id, b.total_amount, b.amount_paid, b.paid_status,
            b.pickup_point, b.group_contact, b.booked_by, b.created_at,
            t.date AS trip_date, t.time AS trip_time, t.status AS trip_status,
@@ -648,21 +651,78 @@ router.get('/public/pass/:pnr', (req, res) => {
     JOIN trips t ON t.id = b.trip_id
     JOIN routes r ON r.id = t.route_id
     JOIN buses bu ON bu.id = t.bus_id
-    WHERE UPPER(b.pnr) = ?
-  `).get(pnr);
+  `;
 
-  if (!b) {
-    return res.status(404).json({ error: 'Boarding Pass not found for PNR ' + pnr });
+  // 1. Direct exact PNR or 6-digit PNR match
+  let directBooking = db.prepare(`${bookingSelectSql} WHERE UPPER(b.pnr) = ?`).get(upper);
+  if (!directBooking && /^\d{6}$/.test(digits)) {
+    directBooking = db.prepare(`${bookingSelectSql} WHERE UPPER(b.pnr) = ?`).get('PNR' + digits);
   }
 
-  const seats = db.prepare(`
-    SELECT id, seat_label, passenger_name, age, gender, contact, boarded
-    FROM booking_seats
-    WHERE booking_id = ?
-    ORDER BY seat_label ASC
-  `).all(b.id);
+  if (directBooking) {
+    const seats = db.prepare(`
+      SELECT id, seat_label, passenger_name, age, gender, contact, boarded
+      FROM booking_seats
+      WHERE booking_id = ?
+      ORDER BY seat_label ASC
+    `).all(directBooking.id);
+    return res.json({ ...directBooking, seats });
+  }
 
-  res.json({ ...b, seats });
+  // 2. Search by mobile number or partial PNR
+  const phoneDigits = digits.length >= 10 ? digits.slice(-10) : digits;
+  if (phoneDigits.length >= 4 || upper.length >= 3) {
+    const phoneTerm = `%${phoneDigits}%`;
+    const pnrTerm = `%${upper}%`;
+
+    const matches = db.prepare(`
+      SELECT DISTINCT b.id, b.pnr, b.trip_id, b.total_amount, b.amount_paid, b.paid_status,
+             b.pickup_point, b.group_contact, b.booked_by, b.created_at,
+             t.date AS trip_date, t.time AS trip_time, t.status AS trip_status,
+             r.name AS route_name, r.source, r.destination, bu.name AS bus_name
+      FROM bookings b
+      JOIN trips t ON t.id = b.trip_id
+      JOIN routes r ON r.id = t.route_id
+      JOIN buses bu ON bu.id = t.bus_id
+      LEFT JOIN booking_seats bs ON bs.booking_id = b.id
+      WHERE (b.group_contact LIKE ? OR bs.contact LIKE ? OR UPPER(b.pnr) LIKE ?)
+      ORDER BY t.date DESC, b.id DESC
+      LIMIT 20
+    `).all(phoneTerm, phoneTerm, pnrTerm);
+
+    if (matches.length === 1) {
+      const b = matches[0];
+      const seats = db.prepare(`
+        SELECT id, seat_label, passenger_name, age, gender, contact, boarded
+        FROM booking_seats
+        WHERE booking_id = ?
+        ORDER BY seat_label ASC
+      `).all(b.id);
+      return res.json({ ...b, seats });
+    }
+
+    if (matches.length > 1) {
+      const bookingsWithSeats = matches.map((b) => ({
+        ...b,
+        seats: db.prepare(`
+          SELECT id, seat_label, passenger_name, age, gender, contact, boarded
+          FROM booking_seats
+          WHERE booking_id = ?
+          ORDER BY seat_label ASC
+        `).all(b.id),
+      }));
+      return res.json({
+        multiple: true,
+        query: raw,
+        count: bookingsWithSeats.length,
+        bookings: bookingsWithSeats,
+      });
+    }
+  }
+
+  return res.status(404).json({
+    error: `No active Boarding Pass found for PNR or Mobile Number "${raw}".`,
+  });
 });
 
 router.get('/bookings/:id', requireAuth, (req, res) => {

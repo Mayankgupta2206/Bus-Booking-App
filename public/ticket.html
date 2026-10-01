@@ -210,11 +210,10 @@ th {
 }
 .search-input {
   width: 100%;
-  max-width: 280px;
+  max-width: 320px;
   padding: 10px 14px;
   font-size: 15px;
   font-family: 'IBM Plex Mono', monospace;
-  text-transform: uppercase;
   border: 1px solid var(--line);
   border-radius: 6px;
   text-align: center;
@@ -277,33 +276,37 @@ function fmtMoney(n) {
   return '₹' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
 }
 
-async function loadTicket(pnrToLoad) {
+async function loadTicket(queryToLoad) {
   const container = document.getElementById('ticketApp');
   const params = new URLSearchParams(window.location.search);
-  const pnr = (pnrToLoad || params.get('pnr') || '').trim().toUpperCase();
+  const query = (queryToLoad || params.get('pnr') || params.get('phone') || params.get('q') || '').trim();
 
-  if (!pnr) {
-    renderSearchForm(container, 'Enter your booking PNR (e.g., PNR123456) to view your Boarding Pass.');
+  if (!query) {
+    renderSearchForm(container, 'Enter your booking PNR (e.g. PNR488408) or 10-digit mobile number to view your Boarding Pass.');
     return;
   }
 
   container.innerHTML = `
     <div style="text-align:center;padding:40px 0;">
       <span class="spin"></span>
-      <div style="font-size:13px;color:var(--ink-soft);margin-top:10px;">Verifying PNR ${esc(pnr)}…</div>
+      <div style="font-size:13px;color:var(--ink-soft);margin-top:10px;">Finding Boarding Pass for ${esc(query)}…</div>
     </div>
   `;
 
   try {
-    const res = await fetch('/api/public/pass/' + encodeURIComponent(pnr));
+    const res = await fetch('/api/public/pass/' + encodeURIComponent(query));
     let data = null;
     try { data = await res.json(); } catch (e) {}
 
     if (!res.ok) {
-      throw new Error((data && data.error) || 'No active Boarding Pass found for PNR ' + pnr);
+      throw new Error((data && data.error) || 'No active Boarding Pass found for ' + query);
     }
 
-    renderBoardingPass(container, data);
+    if (data.multiple) {
+      renderMultipleBookings(container, data);
+    } else {
+      renderBoardingPass(container, data);
+    }
   } catch (err) {
     renderSearchForm(container, err.message);
   }
@@ -316,26 +319,89 @@ function renderSearchForm(container, message) {
       <h2 style="font-family:'Spectral',serif;font-size:22px;margin:8px 0 4px;">Find Your Boarding Pass</h2>
       <p style="font-size:13px;color:var(--ink-soft);margin-bottom:12px;">${esc(message)}</p>
       <form onsubmit="handleSearch(event)">
-        <input type="text" id="pnrInput" class="search-input" placeholder="e.g. PNR450574" required maxlength="12" autofocus>
+        <input type="text" id="pnrInput" class="search-input" placeholder="e.g. PNR488408 or 9876543210" required maxlength="25" autofocus>
         <br>
-        <button type="submit" class="btn-search">View Boarding Pass</button>
+        <button type="submit" class="btn-search">Find Boarding Pass</button>
       </form>
     </div>
   `;
 }
 
+function renderMultipleBookings(container, data) {
+  const bookings = data.bookings || [];
+  const cardsHtml = bookings.map((b) => {
+    const seats = b.seats || [];
+    const seatStr = seats.map((s) => s.seat_label).join(', ');
+    const stampClass = b.paid_status === 'Paid' ? 'stamp-paid' : b.paid_status === 'Partial' ? 'stamp-partial' : 'stamp-unpaid';
+    return `
+      <div style="background:#FAF8F5;border:1px solid var(--line);border-radius:8px;padding:14px;display:flex;flex-direction:column;gap:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+          <div>
+            <div style="font-weight:700;font-size:15px;color:var(--ink);">${esc(b.route_name || (b.source + ' ➔ ' + b.destination))}</div>
+            <div style="font-size:12.5px;color:var(--ink-soft);margin-top:2px;">🚌 ${esc(b.bus_name || 'Seva Express')}</div>
+          </div>
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:700;background:#FFFFFF;border:1px solid var(--line);padding:3px 8px;border-radius:4px;color:var(--maroon);">
+            ${esc(b.pnr)}
+          </span>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;color:var(--ink);background:#FFFFFF;padding:8px 10px;border-radius:6px;border:1px solid #ECECEC;">
+          <div>📅 <b>Date:</b> ${fmtDate(b.trip_date)}</div>
+          <div>⏰ <b>Time:</b> ${esc(b.trip_time)}</div>
+          <div>💺 <b>Seats:</b> <b style="color:var(--maroon);">${esc(seatStr)}</b></div>
+          <div>💳 <b>Status:</b> <b>${esc(b.paid_status)}</b></div>
+        </div>
+
+        <div style="display:flex;justify-content:flex-end;margin-top:4px;">
+          <button class="btn-search" style="padding:7px 16px;font-size:13px;" onclick="selectPass('${esc(b.pnr)}')">
+            View Boarding Pass ➔
+          </button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  container.innerHTML = `
+    <div class="search-box-card" style="text-align:left;max-width:540px;">
+      <div style="text-align:center;margin-bottom:18px;">
+        <div class="ticket-badge">SEVA BUS SERVICE</div>
+        <h2 style="font-family:'Spectral',serif;font-size:22px;margin:8px 0 4px;">Select Your Trip Pass</h2>
+        <p style="font-size:13px;color:var(--ink-soft);margin-bottom:6px;">
+          Found <b>${data.count} bookings</b> matching <b>${esc(data.query)}</b>
+        </p>
+        <div style="font-size:12px;color:var(--maroon);">Click on any trip below to view your full Boarding Pass.</div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:12px;">
+        ${cardsHtml}
+      </div>
+
+      <div style="margin-top:20px;text-align:center;">
+        <button class="btn-print" onclick="showSearch()">🔍 Search Another Number / PNR</button>
+      </div>
+    </div>
+  `;
+}
+
+function selectPass(pnr) {
+  window.history.pushState(null, '', '?pnr=' + encodeURIComponent(pnr));
+  loadTicket(pnr);
+}
+
 function handleSearch(e) {
   e.preventDefault();
-  const val = document.getElementById('pnrInput').value.trim().toUpperCase();
+  const val = document.getElementById('pnrInput').value.trim();
   if (val) {
-    window.history.pushState(null, '', '?pnr=' + encodeURIComponent(val));
+    const isPnr = /^PNR/i.test(val);
+    const param = isPnr ? '?pnr=' : '?q=';
+    window.history.pushState(null, '', param + encodeURIComponent(val));
     loadTicket(val);
   }
 }
 
 function showSearch() {
   window.history.pushState(null, '', window.location.pathname);
-  renderSearchForm(document.getElementById('ticketApp'), 'Enter your booking PNR to view your Boarding Pass.');
+  renderSearchForm(document.getElementById('ticketApp'), 'Enter your booking PNR (e.g. PNR488408) or 10-digit mobile number to view your Boarding Pass.');
 }
 
 window.addEventListener('popstate', () => loadTicket());

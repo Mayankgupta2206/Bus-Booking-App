@@ -28,6 +28,8 @@ A production-grade, internal bus seva booking, fleet operations, and ticketing p
 - **Zero Login Exposure:** Passengers accessing digital tickets never see the staff/admin portal or login screen.
 - **Standalone Passenger Pass (`/ticket` / `/pass` / `public/ticket.html`):**
   - High-performance, lightweight page containing zero staff/admin code.
+  - **Flexible Ticket Lookup by PNR or Mobile Number:** Passengers can search their boarding pass using either their booking PNR (e.g. `PNR488408` or `488408`) or their registered 10-digit mobile number.
+  - **Multiple Bookings Selector:** If multiple trips are booked under the same mobile number, an interactive selection screen displays all matching trips with a 1-tap button to view and print each pass.
   - Displays passenger details, route, bus, departure time, seat list, payment stamp, and scannable QR verification code.
   - Integrated with **"Print / Save PDF"** and in-page **"Search Another Pass"** without page reloads.
 - **Dedicated Public Domain Support (Option 1 & 2):**
@@ -132,7 +134,7 @@ All endpoints except public pass lookup and login require `Authorization: Bearer
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/auth/login` | Staff authentication with IP rate limiting |
-| `GET` | `/api/public/pass/:pnr` | Public passenger pass verification (no login required) |
+| `GET` | `/api/public/pass/:query` | Public passenger pass verification by PNR or Mobile Number (no login required) |
 | `GET` | `/api/settings/public` | Public settings (passenger pass domain, company name, helpline) |
 
 ### Authenticated & RBAC Endpoints
