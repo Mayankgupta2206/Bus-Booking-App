@@ -452,77 +452,34 @@ function attachRoute() {
 /* ---------- Ticket Modal & WhatsApp Sharing ---------- */
 const WA_ICON_SVG = '<svg class="wa-icon" viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true" style="vertical-align:-2px;display:inline-block;flex-shrink:0;"><path d="M12.04 2C6.5 2 2 6.5 2 12.04c0 1.85.5 3.66 1.46 5.25L2 22l4.87-1.42c1.53.9 3.29 1.38 5.17 1.38 5.54 0 10.04-4.5 10.04-10.04C22.08 6.5 17.58 2 12.04 2zm0 18.27c-1.63 0-3.17-.46-4.51-1.28l-.32-.2-3.35.98.9-3.26-.22-.35A8.15 8.15 0 013.88 12c0-4.51 3.66-8.17 8.16-8.17 4.5 0 8.16 3.66 8.16 8.17 0 4.5-3.66 8.27-8.16 8.27zm4.72-6.14c-.26-.13-1.53-.76-1.77-.85-.24-.09-.41-.13-.58.13-.17.26-.67.85-.82 1.02-.15.17-.3.2-.56.06-.26-.13-1.09-.4-2.08-1.28-.77-.69-1.29-1.54-1.44-1.8-.15-.26-.02-.4.11-.53.12-.12.26-.3.39-.46.13-.15.17-.26.26-.43.09-.17.04-.32-.02-.45-.06-.13-.58-1.41-.8-1.93-.21-.51-.43-.44-.59-.45h-.5c-.17 0-.45.06-.69.32-.24.26-.91.89-.91 2.17 0 1.28.93 2.51 1.06 2.68.13.17 1.83 2.79 4.43 3.91.62.27 1.1.43 1.48.55.62.2 1.19.17 1.63.1.5-.07 1.53-.63 1.75-1.23.21-.61.21-1.13.15-1.23-.07-.1-.24-.17-.5-.3z"/></svg>';
 
-function generateFullTicketText(booking, trip) {
-  const pnr = booking.pnr || '—';
-  const route = trip?.route_name || trip?.route || booking.route_name || 'Seva Bus';
-  const date = fmtDate(trip?.date || trip?.trip_date || booking.trip_date);
-  const time = trip?.time || trip?.trip_time || booking.trip_time || '';
-  const bus = trip?.bus_name || trip?.bus || booking.bus_name || 'Seva Bus';
-  const pickup = booking.pickup_point ? String(booking.pickup_point).trim() : '';
-
-  const seats = booking.seats || [];
-  const seatCount = seats.length || 1;
-  const seatLabels = seats.map((s) => s.seat_label).filter(Boolean).join(', ') || '—';
-
-  const total = Number(booking.total_amount || 0);
-  const paid = Number(booking.amount_paid || 0);
-  const due = Math.max(0, total - paid);
-  const status = booking.paid_status || (due === 0 ? 'Paid' : paid > 0 ? 'Partial' : 'Unpaid');
-  const payMethod = booking.payment_method || 'Cash';
-  const bookedBy = booking.booked_by || 'Staff';
-
-  // Build Passenger List Details
-  let passengerSection = '';
-  if (seats.length > 0) {
-    passengerSection = seats.map((s, i) => {
-      const sLabel = s.seat_label || `Seat ${i + 1}`;
-      const pName = s.passenger_name || 'Passenger';
-      const ageGender = [s.age ? `${s.age}Y` : '', s.gender || ''].filter(Boolean).join(' / ');
-      const phone = s.contact || booking.group_contact || '';
-      return `• *Seat ${sLabel}:* ${pName}${ageGender ? ` (${ageGender})` : ''}${phone ? ` · 📞 ${phone}` : ''}`;
-    }).join('\n');
-  } else {
-    passengerSection = `• *Seat(s):* ${seatLabels}`;
-  }
-
-  // Status Badge Text
-  const statusEmoji = status === 'Paid' ? 'Paid in Full ✅' : status === 'Partial' ? `Advance Paid (Due: ₹${due.toFixed(2)}) ⚠️` : 'Unpaid ❌';
+function shareTicketWhatsapp(booking, trip) {
+  const pnr = booking.pnr || '';
+  const route = trip?.route_name || booking.route_name || 'Seva Bus';
+  const date = fmtDate(trip?.date || booking.trip_date);
+  const time = trip?.time || booking.trip_time || '';
+  const bus = trip?.bus_name || booking.bus_name || 'Seva Bus';
+  const seats = (booking.seats || []).map((s) => s.seat_label).join(', ');
+  const passengerNames = (booking.seats || []).map((s) => `${s.passenger_name || 'Passenger'} (${s.seat_label})`).join(', ');
+  const total = fmtMoney(booking.total_amount);
+  const paid = fmtMoney(booking.amount_paid);
+  const status = booking.paid_status || 'Unpaid';
+  const due = Math.max(0, Number(booking.total_amount || 0) - Number(booking.amount_paid || 0));
+  const pickup = booking.pickup_point ? `\n📍 *Pickup Stop:* ${booking.pickup_point}` : '';
 
   const lines = [
-    '🎫 *SEVA BUS SERVICE — E-TICKET & BOARDING PASS*',
-    '━━━━━━━━━━━━━━━━━━━━━━━━━━',
-    `🔖 *PNR:* ${pnr}`,
-    `📌 *Booking Status:* ${statusEmoji}`,
-    '━━━━━━━━━━━━━━━━━━━━━━━━━━',
-    '🚌 *JOURNEY & BUS DETAILS*',
-    `🛣️ *Route:* ${route}`,
-    `📅 *Date of Journey:* ${date}`,
-    `⏰ *Departure Time:* ${time}`,
-    `🚍 *Bus / Coach:* ${bus}`,
-    pickup ? `📍 *Boarding / Pickup Stop:* ${pickup}` : null,
-    '━━━━━━━━━━━━━━━━━━━━━━━━━━',
-    `👥 *PASSENGER DETAILS (${seatCount} Seat${seatCount > 1 ? 's' : ''})*`,
-    passengerSection,
-    '━━━━━━━━━━━━━━━━━━━━━━━━━━',
-    '💰 *FARE & PAYMENT BREAKDOWN*',
-    `• Total Fare: ${fmtMoney(total)}`,
-    `• Amount Paid: ${fmtMoney(paid)} (${payMethod})`,
-    due > 0 ? `• ⚠️ *Balance Due at Boarding:* ₹${due.toFixed(2)}` : '• Balance Due: ₹0.00 (Fully Settled ✅)',
-    `• Booked by: ${bookedBy}`,
-    '━━━━━━━━━━━━━━━━━━━━━━━━━━',
-    '📋 *IMPORTANT BOARDING INSTRUCTIONS*',
-    '1. Please arrive at the boarding stop at least 15 minutes before departure.',
-    `2. Keep this WhatsApp ticket or your PNR (*${pnr}*) handy at boarding.`,
-    '3. Please ensure luggage is identified with your assigned seat number.',
-    '━━━━━━━━━━━━━━━━━━━━━━━━━━',
-    '🙏 *Thank you for choosing Seva Bus! Wishing you a safe & pleasant journey.*'
-  ].filter(Boolean);
+    '🎫 *SEVA BUS BOOKING PASS*',
+    `*PNR:* ${pnr}`,
+    `📍 *Route:* ${route}`,
+    `📅 *Date & Time:* ${date} at ${time}`,
+    `🚌 *Bus:* ${bus}${pickup}`,
+    `💺 *Seat(s):* ${seats}`,
+    `👤 *Passenger(s):* ${passengerNames}`,
+    `💵 *Fare:* ${total} · Paid: ${paid} (${status})${due > 0 ? ` · *Due at Boarding:* ₹${due.toFixed(2)}` : ''}`,
+    '',
+    '🙏 *Thank you for choosing Seva Bus. Have a safe and pleasant journey!*'
+  ];
 
-  return lines.join('\n');
-}
-
-function shareTicketWhatsapp(booking, trip) {
-  const text = generateFullTicketText(booking, trip);
+  const text = lines.join('\n');
   const rawPhone = (booking.seats && booking.seats[0] && booking.seats[0].contact) || booking.group_contact || '';
   const digits = String(rawPhone).replace(/\D/g, '');
   const phoneParam = digits.length >= 10 ? (digits.length === 10 ? '91' + digits : digits) : '';
@@ -594,8 +551,7 @@ function openTicketModal(booking, trip) {
         </div>
       </div>
 
-      <div class="actions-row no-print" style="justify-content:flex-end;margin-top:18px;gap:8px;flex-wrap:wrap;">
-        <button class="btn btn-secondary" id="ticketCopyTextBtn" title="Copy full ticket text to clipboard">📋 Copy Ticket</button>
+      <div class="actions-row no-print" style="justify-content:flex-end;margin-top:18px;gap:8px;">
         <button class="btn btn-whatsapp" id="ticketShareWaBtn" title="Share via WhatsApp">${WA_ICON_SVG} Share WhatsApp</button>
         <button class="btn btn-secondary" id="ticketCloseBtn">Close</button>
         <button class="btn btn-primary" id="ticketPrintBtn">Print Boarding Pass</button>
@@ -615,19 +571,6 @@ function openTicketModal(booking, trip) {
         correctLevel: QRCode.CorrectLevel.M
       });
     } catch (e) { console.warn('QR render error:', e); }
-  }
-
-  const copyBtn = document.getElementById('ticketCopyTextBtn');
-  if (copyBtn) {
-    copyBtn.onclick = async () => {
-      const text = generateFullTicketText(booking, trip);
-      try {
-        await navigator.clipboard.writeText(text);
-        toast('Full ticket text copied to clipboard!');
-      } catch (e) {
-        toast('Ticket text ready');
-      }
-    };
   }
 
   const waBtn = document.getElementById('ticketShareWaBtn');
@@ -1470,7 +1413,6 @@ function showConfirmModal(data, seats) {
     <p style="font-size:13.5px;color:var(--ink-soft);margin:0 0 14px;">Total: ${fmtMoney(data.totalAmount)} · Paid now: ${fmtMoney(data.amountPaid)} · Balance: ${fmtMoney(Math.max(0, data.totalAmount - data.amountPaid))} · ${esc(data.paidStatus)}</p>
     <div class="table-wrap"><table><thead><tr><th>Seat</th><th>Name</th><th>Age</th><th>Gender</th><th>Phone</th></tr></thead><tbody>${rows}</tbody></table></div>
     <div style="margin-top:18px;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;">
-      <button class="btn btn-secondary" id="modalCopyTextBtn" title="Copy full ticket text">📋 Copy Ticket</button>
       <button class="btn btn-whatsapp" id="modalShareWaBtn">${WA_ICON_SVG} Share WhatsApp</button>
       <button class="btn btn-secondary" id="modalTicketBtn">Print Boarding Pass</button>
       <button class="btn btn-primary" id="modalOk">Done</button>
@@ -1483,24 +1425,10 @@ function showConfirmModal(data, seats) {
     total_amount: data.totalAmount,
     amount_paid: data.amountPaid,
     paid_status: data.paidStatus,
-    payment_method: data.paymentMethod || bookingCtx.paymentMethod || 'Cash',
     booked_by: state.user.name,
-    pickup_point: data.pickupPoint || bookingCtx.pickupPoint || null,
+    pickup_point: data.pickupPoint,
     seats: seats.map((s) => ({ seat_label: s.label, passenger_name: s.name, age: s.age, gender: s.gender, contact: s.contact })),
   };
-
-  const modalCopyBtn = document.getElementById('modalCopyTextBtn');
-  if (modalCopyBtn) {
-    modalCopyBtn.onclick = async () => {
-      const text = generateFullTicketText(confirmObj, trip);
-      try {
-        await navigator.clipboard.writeText(text);
-        toast('Full ticket text copied to clipboard!');
-      } catch (e) {
-        toast('Ticket text ready');
-      }
-    };
-  }
 
   const waBtn = document.getElementById('modalShareWaBtn');
   if (waBtn) waBtn.onclick = () => shareTicketWhatsapp(confirmObj, trip);
