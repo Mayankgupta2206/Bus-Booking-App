@@ -135,6 +135,11 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   role TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 `);
 
 function ensureColumn(table, column, defSql) {
@@ -143,6 +148,8 @@ function ensureColumn(table, column, defSql) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${defSql}`);
   }
 }
+
+ensureColumn('users', 'permissions', 'TEXT');
 
 ensureColumn('routes', 'fare', 'REAL NOT NULL DEFAULT 0');
 ensureColumn('routes', 'pickup_points', 'TEXT');
@@ -374,6 +381,99 @@ function seedIfEmpty() {
 }
 seedIfEmpty();
 
+const ALL_PERMISSIONS = [
+  'can_book',
+  'can_cancel',
+  'can_collect_payment',
+  'can_manifest',
+  'can_manage_routes',
+  'can_manage_trips',
+  'can_manage_buses',
+  'can_view_logs',
+  'can_manage_users',
+  'can_manage_settings'
+];
+
+function defaultPermissionsForRole(role) {
+  if (role === 'Admin') {
+    return ALL_PERMISSIONS.reduce((acc, p) => ({ ...acc, [p]: true }), {});
+  }
+  if (role === 'Supervisor') {
+    return {
+      can_book: false,
+      can_cancel: true,
+      can_collect_payment: true,
+      can_manifest: true,
+      can_manage_routes: false,
+      can_manage_trips: false,
+      can_manage_buses: false,
+      can_view_logs: true,
+      can_manage_users: false,
+      can_manage_settings: false,
+    };
+  }
+  // Agent
+  return {
+    can_book: true,
+    can_cancel: true,
+    can_collect_payment: false,
+    can_manifest: false,
+    can_manage_routes: false,
+    can_manage_trips: false,
+    can_manage_buses: false,
+    can_view_logs: false,
+    can_manage_users: false,
+    can_manage_settings: false,
+  };
+}
+
+function parseUserPermissions(user) {
+  if (!user) return {};
+  if (user.role === 'Admin') {
+    return defaultPermissionsForRole('Admin');
+  }
+  if (user.permissions) {
+    try {
+      const parsed = typeof user.permissions === 'string' ? JSON.parse(user.permissions) : user.permissions;
+      if (parsed && typeof parsed === 'object') {
+        return { ...defaultPermissionsForRole(user.role), ...parsed };
+      }
+    } catch (e) { /* ignore */ }
+  }
+  return defaultPermissionsForRole(user.role);
+}
+
+function getSetting(key, defVal = '') {
+  try {
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+    return row ? row.value : defVal;
+  } catch (e) {
+    return defVal;
+  }
+}
+
+function setSetting(key, val) {
+  db.prepare(`
+    INSERT INTO settings (key, value) VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `).run(String(key), String(val));
+  db.syncCloud();
+}
+
 db.logAudit = logAudit;
-db.helpers = { parsePattern, defaultLayout, countSeats, layoutWidth, getBusLayout, serializeLayout, resolvePaidStatus, logAudit };
+db.helpers = {
+  parsePattern,
+  defaultLayout,
+  countSeats,
+  layoutWidth,
+  getBusLayout,
+  serializeLayout,
+  resolvePaidStatus,
+  logAudit,
+  ALL_PERMISSIONS,
+  defaultPermissionsForRole,
+  parseUserPermissions,
+  getSetting,
+  setSetting
+};
 module.exports = db;

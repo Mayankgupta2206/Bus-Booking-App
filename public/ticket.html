@@ -277,15 +277,22 @@ function fmtMoney(n) {
   return '₹' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
 }
 
-async function loadTicket() {
+async function loadTicket(pnrToLoad) {
   const container = document.getElementById('ticketApp');
   const params = new URLSearchParams(window.location.search);
-  const pnr = (params.get('pnr') || '').trim().toUpperCase();
+  const pnr = (pnrToLoad || params.get('pnr') || '').trim().toUpperCase();
 
   if (!pnr) {
-    renderSearchForm(container, 'Please enter your booking PNR to view your Boarding Pass.');
+    renderSearchForm(container, 'Enter your booking PNR (e.g., PNR123456) to view your Boarding Pass.');
     return;
   }
+
+  container.innerHTML = `
+    <div style="text-align:center;padding:40px 0;">
+      <span class="spin"></span>
+      <div style="font-size:13px;color:var(--ink-soft);margin-top:10px;">Verifying PNR ${esc(pnr)}…</div>
+    </div>
+  `;
 
   try {
     const res = await fetch('/api/public/pass/' + encodeURIComponent(pnr));
@@ -309,7 +316,7 @@ function renderSearchForm(container, message) {
       <h2 style="font-family:'Spectral',serif;font-size:22px;margin:8px 0 4px;">Find Your Boarding Pass</h2>
       <p style="font-size:13px;color:var(--ink-soft);margin-bottom:12px;">${esc(message)}</p>
       <form onsubmit="handleSearch(event)">
-        <input type="text" id="pnrInput" class="search-input" placeholder="e.g. PNR450574" required maxlength="12">
+        <input type="text" id="pnrInput" class="search-input" placeholder="e.g. PNR450574" required maxlength="12" autofocus>
         <br>
         <button type="submit" class="btn-search">View Boarding Pass</button>
       </form>
@@ -321,9 +328,17 @@ function handleSearch(e) {
   e.preventDefault();
   const val = document.getElementById('pnrInput').value.trim().toUpperCase();
   if (val) {
-    window.location.search = '?pnr=' + encodeURIComponent(val);
+    window.history.pushState(null, '', '?pnr=' + encodeURIComponent(val));
+    loadTicket(val);
   }
 }
+
+function showSearch() {
+  window.history.pushState(null, '', window.location.pathname);
+  renderSearchForm(document.getElementById('ticketApp'), 'Enter your booking PNR to view your Boarding Pass.');
+}
+
+window.addEventListener('popstate', () => loadTicket());
 
 function renderBoardingPass(container, b) {
   const seats = b.seats || [];
@@ -384,7 +399,8 @@ function renderBoardingPass(container, b) {
 
     <div class="actions-bar no-print">
       <button class="btn-print" onclick="window.print()">🖨️ Print / Save PDF</button>
-      <span style="font-size:12px;color:var(--ink-soft);">Official Seva Bus E-Ticket</span>
+      <button class="btn-print" onclick="showSearch()">🔍 Search Another Pass</button>
+      <span style="font-size:12px;color:var(--ink-soft);">Official Seva Bus Pass</span>
     </div>
   `;
 
@@ -404,7 +420,7 @@ function renderBoardingPass(container, b) {
   }
 }
 
-document.addEventListener('DOMContentLoaded', loadTicket);
+document.addEventListener('DOMContentLoaded', () => loadTicket());
 </script>
 
 </body>

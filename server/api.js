@@ -4,10 +4,13 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const rateLimit = require('express-rate-limit');
 const db = require('./db');
-const { signToken, requireAuth, requireAdmin, requireAgentOrAdmin, requireAdminOrSupervisor } = require('./auth');
+const { signToken, requireAuth, requireAdmin, requirePerm, requireAgentOrAdmin, requireAdminOrSupervisor } = require('./auth');
 const { runBackup, BACKUP_DIR } = require('./backup');
 
-const { getBusLayout, countSeats, serializeLayout, defaultLayout, resolvePaidStatus, logAudit } = db.helpers;
+const {
+  getBusLayout, countSeats, serializeLayout, defaultLayout, resolvePaidStatus, logAudit,
+  ALL_PERMISSIONS, defaultPermissionsForRole, parseUserPermissions, getSetting, setSetting
+} = db.helpers;
 const router = express.Router();
 
 // Rate limiter for login to prevent brute force
@@ -31,6 +34,9 @@ function enrichBus(bus) {
 
 /* ---------- Auth ---------- */
 router.post('/auth/login', loginLimiter, (req, res) => {
+  if (req.isPassengerMode) {
+    return res.status(403).json({ error: 'Administrative login is disabled on the passenger boarding pass portal.' });
+  }
   const { username, password } = req.body || {};
   if (!username || !password) {
     return res.status(400).json({ error: 'Username and password are required.' });
@@ -40,11 +46,28 @@ router.post('/auth/login', loginLimiter, (req, res) => {
     return res.status(401).json({ error: 'Invalid username or password.' });
   }
   const token = signToken(user);
-  res.json({ token, user: { id: user.id, name: user.name, role: user.role, username: user.username } });
+  res.json({
+    token,
+    user: {
+      id: user.id,
+      name: user.name,
+      role: user.role,
+      username: user.username,
+      permissions: parseUserPermissions(user)
+    }
+  });
 });
 
 router.get('/me', requireAuth, (req, res) => {
-  res.json({ user: { id: req.user.id, name: req.user.name, role: req.user.role, username: req.user.username } });
+  res.json({
+    user: {
+      id: req.user.id,
+      name: req.user.name,
+      role: req.user.role,
+      username: req.user.username,
+      permissions: req.user.permissions
+    }
+  });
 });
 
 /* ---------- Routes ---------- */
@@ -52,7 +75,7 @@ router.get('/routes', requireAuth, (req, res) => {
   res.json(db.prepare('SELECT * FROM routes ORDER BY name').all());
 });
 
-router.post('/routes', requireAuth, requireAdmin, (req, res) => {
+router.post('/routes', requireAuth, requirePerm('can_manage_routes'), (req, res) => {
   const { name, source, destination, fare, pickupPoints } = req.body || {};
   if (!name || !source || !destination) return res.status(400).json({ error: 'This field is required.' });
   const fareNum = Number(fare);
@@ -71,7 +94,7 @@ router.post('/routes', requireAuth, requireAdmin, (req, res) => {
   }
 });
 
-router.patch('/routes/:id', requireAuth, requireAdmin, (req, res) => {
+router.patch('/routes/:id', requireAuth, requirePerm('can_manage_routes'), (req, res) => {
   const route = db.prepare('SELECT * FROM routes WHERE id = ?').get(req.params.id);
   if (!route) return res.status(404).json({ error: 'Route not found.' });
   const name = req.body.name != null ? String(req.body.name).trim() : route.name;
@@ -95,7 +118,7 @@ router.patch('/routes/:id', requireAuth, requireAdmin, (req, res) => {
   }
 });
 
-router.delete('/routes/:id', requireAuth, requireAdmin, (req, res) => {
+router.delete('/routes/:id', requireAuth, requirePerm('can_manage_routes'), (req, res) => {
   const route = db.prepare('SELECT * FROM routes WHERE id = ?').get(req.params.id);
   if (!route) return res.status(404).json({ error: 'Route not found.' });
   const force = req.query.force === '1' || req.query.force === 'true' || req.body?.force;
@@ -120,13 +143,20 @@ router.delete('/routes/:id', requireAuth, requireAdmin, (req, res) => {
   res.json({ ok: true, deletedTrips: tripCount });
 });
 
-/* ---------- Users (Admin) ---------- */
-router.get('/users', requireAuth, requireAdmin, (req, res) => {
-  res.json(db.prepare('SELECT id, username, name, role FROM users ORDER BY role, name').all());
+/* ---------- Users & Powers ---------- */
+router.get('/users', requireAuth, requirePerm('can_manage_users'), (req, res) => {
+  const users = db.prepare('SELECT id, username, name, role, permissions FROM users ORDER BY role, name').all();
+  res.json(users.map((u) => ({
+    id: u.id,
+    username: u.username,
+    name: u.name,
+    role: u.role,
+    permissions: parseUserPermissions(u)
+  })));
 });
 
-router.post('/users', requireAuth, requireAdmin, (req, res) => {
-  const { username, password, name, role } = req.body || {};
+router.post('/users', requireAuth, requirePerm('can_manage_users'), (req, res) => {
+  const { username, password, name, role, permissions } = req.body || {};
   if (!username || !password || !name || !role) {
     return res.status(400).json({ error: 'Username, password, name, and role are required.' });
   }
@@ -136,17 +166,29 @@ router.post('/users', requireAuth, requireAdmin, (req, res) => {
   if (String(password).length < 4) {
     return res.status(400).json({ error: 'Password must be at least 4 characters.' });
   }
+  const permsToSave = permissions && typeof permissions === 'object'
+    ? permissions
+    : defaultPermissionsForRole(role);
   try {
-    const info = db.prepare('INSERT INTO users (username,password_hash,name,role) VALUES (?,?,?,?)')
-      .run(String(username).trim(), bcrypt.hashSync(password, 10), String(name).trim(), role);
-    res.status(201).json(db.prepare('SELECT id, username, name, role FROM users WHERE id = ?').get(info.lastInsertRowid));
+    const info = db.prepare('INSERT INTO users (username,password_hash,name,role,permissions) VALUES (?,?,?,?,?)')
+      .run(String(username).trim(), bcrypt.hashSync(password, 10), String(name).trim(), role, JSON.stringify(permsToSave));
+    const created = db.prepare('SELECT id, username, name, role, permissions FROM users WHERE id = ?').get(info.lastInsertRowid);
+    db.syncCloud();
+    logAudit('USER_CREATED', 'USER', created.id, { username, role }, req.user.name, req.user.role);
+    res.status(201).json({
+      id: created.id,
+      username: created.username,
+      name: created.name,
+      role: created.role,
+      permissions: parseUserPermissions(created)
+    });
   } catch (e) {
     if (String(e).includes('UNIQUE')) return res.status(409).json({ error: 'Username already exists.' });
     res.status(500).json({ error: 'Could not create user.' });
   }
 });
 
-router.patch('/users/:id', requireAuth, requireAdmin, (req, res) => {
+router.patch('/users/:id', requireAuth, requirePerm('can_manage_users'), (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found.' });
   const name = req.body.name != null ? String(req.body.name).trim() : user.name;
@@ -167,16 +209,54 @@ router.patch('/users/:id', requireAuth, requireAdmin, (req, res) => {
   } else {
     db.prepare('UPDATE users SET name=?, role=? WHERE id=?').run(name, role, req.params.id);
   }
-  res.json(db.prepare('SELECT id, username, name, role FROM users WHERE id = ?').get(req.params.id));
+  db.syncCloud();
+  logAudit('USER_UPDATED', 'USER', req.params.id, { name, role }, req.user.name, req.user.role);
+  const updated = db.prepare('SELECT id, username, name, role, permissions FROM users WHERE id = ?').get(req.params.id);
+  res.json({
+    id: updated.id,
+    username: updated.username,
+    name: updated.name,
+    role: updated.role,
+    permissions: parseUserPermissions(updated)
+  });
 });
 
-router.delete('/users/:id', requireAuth, requireAdmin, (req, res) => {
+/* Update specific permissions / powers for a user */
+router.patch('/users/:id/permissions', requireAuth, requirePerm('can_manage_users'), (req, res) => {
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found.' });
+  const { permissions } = req.body || {};
+  if (!permissions || typeof permissions !== 'object') {
+    return res.status(400).json({ error: 'Valid permissions object is required.' });
+  }
+
+  // Prevent admin from removing their own power to manage users
+  if (Number(user.id) === Number(req.user.id) && permissions.can_manage_users === false) {
+    return res.status(400).json({ error: 'You cannot revoke user management powers from your own account.' });
+  }
+
+  db.prepare('UPDATE users SET permissions = ? WHERE id = ?').run(JSON.stringify(permissions), req.params.id);
+  db.syncCloud();
+  logAudit('USER_PERMISSIONS_UPDATED', 'USER', req.params.id, { username: user.username, permissions }, req.user.name, req.user.role);
+  const updated = db.prepare('SELECT id, username, name, role, permissions FROM users WHERE id = ?').get(req.params.id);
+  res.json({
+    id: updated.id,
+    username: updated.username,
+    name: updated.name,
+    role: updated.role,
+    permissions: parseUserPermissions(updated)
+  });
+});
+
+router.delete('/users/:id', requireAuth, requirePerm('can_manage_users'), (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found.' });
   if (Number(user.id) === Number(req.user.id)) {
     return res.status(400).json({ error: 'You cannot delete your own account.' });
   }
   db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id);
+  db.syncCloud();
+  logAudit('USER_DELETED', 'USER', req.params.id, { username: user.username }, req.user.name, req.user.role);
   res.json({ ok: true });
 });
 
@@ -208,7 +288,7 @@ function validateLayout(layout) {
   return null;
 }
 
-router.post('/buses', requireAuth, requireAdmin, (req, res) => {
+router.post('/buses', requireAuth, requirePerm('can_manage_buses'), (req, res) => {
   const { name, rows, cols, pattern, layout, active } = req.body || {};
   if (!name) return res.status(400).json({ error: 'Bus name is required.' });
   let grid = layout;
@@ -232,7 +312,7 @@ router.post('/buses', requireAuth, requireAdmin, (req, res) => {
   }
 });
 
-router.patch('/buses/:id', requireAuth, requireAdmin, (req, res) => {
+router.patch('/buses/:id', requireAuth, requirePerm('can_manage_buses'), (req, res) => {
   const bus = db.prepare('SELECT * FROM buses WHERE id = ?').get(req.params.id);
   if (!bus) return res.status(404).json({ error: 'Bus not found.' });
   const name = req.body.name != null ? String(req.body.name).trim() : bus.name;
@@ -256,7 +336,7 @@ router.patch('/buses/:id', requireAuth, requireAdmin, (req, res) => {
   }
 });
 
-router.delete('/buses/:id', requireAuth, requireAdmin, (req, res) => {
+router.delete('/buses/:id', requireAuth, requirePerm('can_manage_buses'), (req, res) => {
   const bus = db.prepare('SELECT * FROM buses WHERE id = ?').get(req.params.id);
   if (!bus) return res.status(404).json({ error: 'Bus not found.' });
   const force = req.query.force === '1' || req.query.force === 'true' || req.body?.force;
@@ -305,7 +385,7 @@ router.get('/trips', requireAuth, (req, res) => {
   res.json(withAvail);
 });
 
-router.post('/trips', requireAuth, requireAdmin, (req, res) => {
+router.post('/trips', requireAuth, requirePerm('can_manage_trips'), (req, res) => {
   const { routeId, busId, date, time } = req.body || {};
   if (!routeId || !busId || !date || !time) return res.status(400).json({ error: 'This field is required.' });
   const route = db.prepare('SELECT * FROM routes WHERE id = ?').get(routeId);
@@ -324,7 +404,7 @@ router.post('/trips', requireAuth, requireAdmin, (req, res) => {
   res.status(201).json(trip);
 });
 
-router.patch('/trips/:id/cancel', requireAuth, requireAdmin, (req, res) => {
+router.patch('/trips/:id/cancel', requireAuth, requirePerm('can_manage_trips'), (req, res) => {
   const trip = db.prepare('SELECT * FROM trips WHERE id = ?').get(req.params.id);
   if (!trip) return res.status(404).json({ error: 'Trip not found.' });
   if (trip.status === 'Cancelled') return res.json({ ok: true, status: 'Cancelled' });
@@ -332,7 +412,7 @@ router.patch('/trips/:id/cancel', requireAuth, requireAdmin, (req, res) => {
   res.json({ ok: true, status: 'Cancelled' });
 });
 
-router.patch('/trips/:id/status', requireAuth, requireAdmin, (req, res) => {
+router.patch('/trips/:id/status', requireAuth, requirePerm('can_manage_trips'), (req, res) => {
   const { status } = req.body || {};
   const validStatuses = ['Planned', 'In-Transit', 'Completed', 'Cancelled'];
   if (!validStatuses.includes(status)) {
@@ -344,7 +424,7 @@ router.patch('/trips/:id/status', requireAuth, requireAdmin, (req, res) => {
   res.json({ ok: true, id: trip.id, status });
 });
 
-router.delete('/trips/:id', requireAuth, requireAdmin, (req, res) => {
+router.delete('/trips/:id', requireAuth, requirePerm('can_manage_trips'), (req, res) => {
   const trip = db.prepare('SELECT * FROM trips WHERE id = ?').get(req.params.id);
   if (!trip) return res.status(404).json({ error: 'Trip not found.' });
   const force = req.query.force === '1' || req.query.force === 'true' || req.body?.force;
@@ -836,7 +916,7 @@ router.get('/admin/backups', requireAuth, requireAdmin, (req, res) => {
 });
 
 /* ---------- Manifest: Boarding Check-In ---------- */
-router.post('/manifest/board', requireAuth, (req, res) => {
+router.post('/manifest/board', requireAuth, requirePerm('can_manifest'), (req, res) => {
   const { seatId, bookingId, boarded } = req.body || {};
   const boardedVal = boarded ? 1 : 0;
   const now = new Date().toISOString();
@@ -865,7 +945,7 @@ router.post('/manifest/board', requireAuth, (req, res) => {
 });
 
 /* ---------- Bookings: Spot Balance Payment at Boarding ---------- */
-router.post('/bookings/:id/pay-balance', requireAuth, (req, res) => {
+router.post('/bookings/:id/pay-balance', requireAuth, requirePerm('can_collect_payment'), (req, res) => {
   const booking = db.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id);
   if (!booking) return res.status(404).json({ error: 'Booking not found.' });
 
@@ -921,7 +1001,7 @@ router.post('/bookings/:id/pay-balance', requireAuth, (req, res) => {
 });
 
 /* ---------- Audit Logs ---------- */
-router.get('/audit-logs', requireAuth, requireAdminOrSupervisor, (req, res) => {
+router.get('/audit-logs', requireAuth, requirePerm('can_view_logs'), (req, res) => {
   const limit = Math.min(200, Math.max(10, Number(req.query.limit) || 100));
   const rawLogs = db.prepare('SELECT * FROM audit_logs ORDER BY id DESC LIMIT ?').all(limit);
   const logs = rawLogs.map((l) => ({
@@ -935,6 +1015,40 @@ router.get('/audit-logs', requireAuth, requireAdminOrSupervisor, (req, res) => {
     created_at: l.created_at || l.CREATED_AT || '',
   }));
   res.json(logs);
+});
+
+/* ---------- System Settings (Passenger Portal & Config) ---------- */
+router.get('/settings/public', (req, res) => {
+  res.json({
+    passengerPortalUrl: getSetting('passenger_portal_url', ''),
+    companyName: getSetting('company_name', 'Seva Bus Service'),
+    supportPhone: getSetting('support_phone', '')
+  });
+});
+
+router.get('/settings', requireAuth, requirePerm('can_manage_settings'), (req, res) => {
+  res.json({
+    passenger_portal_url: getSetting('passenger_portal_url', ''),
+    company_name: getSetting('company_name', 'Seva Bus Service'),
+    support_phone: getSetting('support_phone', '')
+  });
+});
+
+router.post('/settings', requireAuth, requirePerm('can_manage_settings'), (req, res) => {
+  const { passenger_portal_url, company_name, support_phone } = req.body || {};
+  if (passenger_portal_url !== undefined) setSetting('passenger_portal_url', String(passenger_portal_url).trim());
+  if (company_name !== undefined) setSetting('company_name', String(company_name).trim());
+  if (support_phone !== undefined) setSetting('support_phone', String(support_phone).trim());
+  
+  logAudit('SETTINGS_UPDATED', 'SYSTEM', 'CONFIG', { passenger_portal_url, company_name, support_phone }, req.user.name, req.user.role);
+  res.json({
+    ok: true,
+    settings: {
+      passenger_portal_url: getSetting('passenger_portal_url', ''),
+      company_name: getSetting('company_name', 'Seva Bus Service'),
+      support_phone: getSetting('support_phone', '')
+    }
+  });
 });
 
 module.exports = router;

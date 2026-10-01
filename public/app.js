@@ -33,10 +33,61 @@ function phoneOk(p) {
   const digits = String(p || '').replace(/\D/g, '');
   return digits.length >= 10 && digits.length <= 15;
 }
+/* ---------- Dynamic Permissions & Powers System (RBAC) ---------- */
+const PERMISSION_DEFINITIONS = [
+  {
+    category: '🎟️ Booking & Ticketing',
+    perms: [
+      { key: 'can_book', name: 'Create Bookings', desc: 'Allows booking seats, selecting routes, and generating PNR passes.' },
+      { key: 'can_cancel', name: 'Cancel & Release Seats', desc: 'Allows cancelling bookings and releasing seats back to inventory.' },
+      { key: 'can_collect_payment', name: 'Collect Spot Cash / UPI', desc: 'Allows recording cash/UPI balance payments at boarding and updating paid status.' },
+    ]
+  },
+  {
+    category: '📋 Operations & Manifest',
+    perms: [
+      { key: 'can_manifest', name: 'Trip Manifest & QR Scanning', desc: 'Allows viewing passenger manifests, check-in, and camera QR boarding scanner.' },
+    ]
+  },
+  {
+    category: '🚌 Fleet & Route Management',
+    perms: [
+      { key: 'can_manage_routes', name: 'Routes & Fares', desc: 'Allows creating, modifying, and deleting routes, pickup stops, and pricing.' },
+      { key: 'can_manage_trips', name: 'Trip Scheduling', desc: 'Allows scheduling bus departures, assigning vehicles, and canceling trips.' },
+      { key: 'can_manage_buses', name: 'Bus Fleet & Seat Layouts', desc: 'Allows building custom seat grids (2+2, sleeper) and registering buses.' },
+    ]
+  },
+  {
+    category: '🛡️ Security & Administration',
+    perms: [
+      { key: 'can_view_logs', name: 'Audit & Activity Logs', desc: 'Allows inspecting real-time system audit logs and staff activity.' },
+      { key: 'can_manage_users', name: 'Manage Staff & Powers', desc: 'Allows creating staff accounts and dynamically delegating permissions.' },
+      { key: 'can_manage_settings', name: 'System Settings & Pass Domain', desc: 'Allows configuring public passenger domain, company details, and support phone.' },
+    ]
+  }
+];
+
+let sysSettings = { passengerPortalUrl: '', companyName: 'Seva Bus Service', supportPhone: '' };
+
+function hasPerm(key) {
+  if (!state.user) return false;
+  if (state.user.role === 'Admin') return true;
+  if (state.user.permissions && state.user.permissions[key] !== undefined) {
+    return Boolean(state.user.permissions[key]);
+  }
+  // Legacy role fallbacks
+  if (key === 'can_book') return roleIs('Admin') || roleIs('Agent');
+  if (key === 'can_manifest') return roleIs('Admin') || roleIs('Supervisor');
+  if (key === 'can_collect_payment') return roleIs('Admin') || roleIs('Supervisor');
+  if (key === 'can_cancel') return true;
+  if (key === 'can_view_logs') return roleIs('Admin') || roleIs('Supervisor');
+  return roleIs('Admin');
+}
+
 function roleIs(role) { return state.user && state.user.role === role; }
-function canBook() { return roleIs('Admin') || roleIs('Agent'); }
-function canManage() { return roleIs('Admin'); }
-function canMarkPaid() { return roleIs('Admin') || roleIs('Supervisor'); }
+function canBook() { return hasPerm('can_book'); }
+function canManage() { return hasPerm('can_manage_routes') || hasPerm('can_manage_buses') || hasPerm('can_manage_trips') || hasPerm('can_manage_users') || hasPerm('can_manage_settings'); }
+function canMarkPaid() { return hasPerm('can_collect_payment'); }
 
 /* ---------- Layout helpers (client) ---------- */
 function parsePattern(pattern) {
@@ -199,11 +250,13 @@ function resetInactivityTimer() {
 });
 
 function nav(path, pushHash = true) {
-  if (path.startsWith('#/booking') && !canBook()) { toast('Your role cannot create bookings'); path = '#/dashboard'; }
-  if (path.startsWith('#/admin') && !canManage() && !(path === '#/admin/audit-logs' && roleIs('Supervisor'))) {
-    toast('Admin access required');
-    path = '#/dashboard';
-  }
+  if (path.startsWith('#/booking') && !hasPerm('can_book')) { toast('Access restricted: Missing booking power'); path = '#/dashboard'; }
+  if (path.startsWith('#/manifest') && !hasPerm('can_manifest')) { toast('Access restricted: Missing manifest power'); path = '#/dashboard'; }
+  if (path === '#/admin/buses' && !hasPerm('can_manage_buses')) { toast('Access restricted: Missing bus fleet power'); path = '#/dashboard'; }
+  if (path === '#/admin/routes-trips' && !(hasPerm('can_manage_routes') || hasPerm('can_manage_trips'))) { toast('Access restricted: Missing route/trip power'); path = '#/dashboard'; }
+  if (path === '#/admin/users' && !hasPerm('can_manage_users')) { toast('Access restricted: Missing user management power'); path = '#/dashboard'; }
+  if (path === '#/admin/audit-logs' && !hasPerm('can_view_logs')) { toast('Access restricted: Missing audit log power'); path = '#/dashboard'; }
+  if (path === '#/admin/settings' && !hasPerm('can_manage_settings')) { toast('Access restricted: Missing settings power'); path = '#/dashboard'; }
   state.route = path;
   if (pushHash && window.location.hash !== path) {
     window.location.hash = path;
@@ -225,9 +278,15 @@ function logout() {
 async function loadCaches() {
   const [routes, buses] = await Promise.all([api('/routes'), api('/buses')]);
   Cache.routes = routes; Cache.buses = buses;
+  loadPublicSettings();
 }
 
 function render() {
+  const host = window.location.hostname.toLowerCase();
+  if (host.includes('seva-pass') || host.includes('passenger-pass') || host.includes('ticket.')) {
+    window.location.replace('/ticket' + window.location.search);
+    return;
+  }
   const app = document.getElementById('app');
   const h = window.location.hash || state.route || '';
   if (h.startsWith('#/pass/')) {
@@ -306,13 +365,14 @@ function renderShell() {
         <div class="mobile-user-role">${esc(state.user.role)}</div>
       </div>
       ${linkBtn('#/dashboard', 'Dashboard')}
-      ${canBook() ? linkBtn('#/booking', 'Create Booking') : ''}
-      ${linkBtn('#/manifest', 'View Manifest')}
+      ${hasPerm('can_book') ? linkBtn('#/booking', 'Create Booking') : ''}
+      ${hasPerm('can_manifest') ? linkBtn('#/manifest', 'View Manifest') : ''}
       ${linkBtn('#/search', 'Search')}
-      ${canManage() ? linkBtn('#/admin/buses', 'Buses & Layouts') : ''}
-      ${canManage() ? linkBtn('#/admin/routes-trips', 'Routes & Trips') : ''}
-      ${canManage() ? linkBtn('#/admin/users', 'Users') : ''}
-      ${(canManage() || roleIs('Supervisor')) ? linkBtn('#/admin/audit-logs', 'Activity Logs') : ''}
+      ${hasPerm('can_manage_buses') ? linkBtn('#/admin/buses', 'Buses & Layouts') : ''}
+      ${(hasPerm('can_manage_routes') || hasPerm('can_manage_trips')) ? linkBtn('#/admin/routes-trips', 'Routes & Trips') : ''}
+      ${hasPerm('can_manage_users') ? linkBtn('#/admin/users', 'Users & Powers') : ''}
+      ${hasPerm('can_view_logs') ? linkBtn('#/admin/audit-logs', 'Activity Logs') : ''}
+      ${hasPerm('can_manage_settings') ? linkBtn('#/admin/settings', '⚙️ Settings') : ''}
       <button type="button" class="navlink mobile-only-item" id="pwaMobileInstallBtn">📲 Install Mobile App</button>
       <button type="button" class="navlink mobile-only-item" id="mobileLogoutBtn" style="color:#DC2626;">🚪 Logout</button>
 
@@ -435,24 +495,26 @@ function routeContent() {
   const r = state.route;
   if (r === '#/dashboard') return dashboardView();
   if (r.startsWith('#/booking') && canBook()) return bookingView();
-  if (r.startsWith('#/manifest')) return manifestView();
+  if (r.startsWith('#/manifest') && hasPerm('can_manifest')) return manifestView();
   if (r.startsWith('#/search')) return searchView();
-  if (r === '#/admin/buses' && canManage()) return adminBusesView();
-  if (r === '#/admin/routes-trips' && canManage()) return adminRoutesTripsView();
-  if (r === '#/admin/users' && canManage()) return adminUsersView();
-  if (r === '#/admin/audit-logs' && (canManage() || roleIs('Supervisor'))) return auditLogsView();
+  if (r === '#/admin/buses' && hasPerm('can_manage_buses')) return adminBusesView();
+  if (r === '#/admin/routes-trips' && (hasPerm('can_manage_routes') || hasPerm('can_manage_trips'))) return adminRoutesTripsView();
+  if (r === '#/admin/users' && hasPerm('can_manage_users')) return adminUsersView();
+  if (r === '#/admin/audit-logs' && hasPerm('can_view_logs')) return auditLogsView();
+  if (r === '#/admin/settings' && hasPerm('can_manage_settings')) return adminSettingsView();
   return dashboardView();
 }
 function attachRoute() {
   const r = state.route;
   if (r === '#/dashboard') attachDashboard();
   else if (r.startsWith('#/booking') && canBook()) attachBooking();
-  else if (r.startsWith('#/manifest')) attachManifest();
+  else if (r.startsWith('#/manifest') && hasPerm('can_manifest')) attachManifest();
   else if (r.startsWith('#/search')) attachSearch();
-  else if (r === '#/admin/buses' && canManage()) attachAdminBuses();
-  else if (r === '#/admin/routes-trips' && canManage()) attachAdminRoutesTrips();
-  else if (r === '#/admin/users' && canManage()) attachAdminUsers();
-  else if (r === '#/admin/audit-logs' && (canManage() || roleIs('Supervisor'))) attachAuditLogs();
+  else if (r === '#/admin/buses' && hasPerm('can_manage_buses')) attachAdminBuses();
+  else if (r === '#/admin/routes-trips' && (hasPerm('can_manage_routes') || hasPerm('can_manage_trips'))) attachAdminRoutesTrips();
+  else if (r === '#/admin/users' && hasPerm('can_manage_users')) attachAdminUsers();
+  else if (r === '#/admin/audit-logs' && hasPerm('can_view_logs')) attachAuditLogs();
+  else if (r === '#/admin/settings' && hasPerm('can_manage_settings')) attachAdminSettings();
 }
 
 /* ---------- Ticket Modal & WhatsApp Sharing ---------- */
@@ -479,7 +541,8 @@ function shareTicketWhatsapp(booking, trip) {
     }).join('\n')
     : `• *Seat(s):* ${seatListStr}`;
 
-  const passUrl = `${window.location.origin}/ticket?pnr=${encodeURIComponent(pnr)}`;
+  const basePassUrl = (sysSettings.passengerPortalUrl || window.PASSENGER_PORTAL_URL || '').trim().replace(/\/+$/, '') || window.location.origin;
+  const passUrl = `${basePassUrl}/ticket?pnr=${encodeURIComponent(pnr)}`;
 
   const lines = [
     '═══════════════════════════',
@@ -3561,28 +3624,39 @@ function openTripForm() {
   });
 }
 
-/* ---------- Admin: Users ---------- */
+/* ---------- Admin: Users & Dynamic Powers ---------- */
 function adminUsersView() {
-  const rows = (usersCache || []).map((u) => `
+  const rows = (usersCache || []).map((u) => {
+    const p = u.permissions || {};
+    const count = Object.values(p).filter(Boolean).length;
+    const powerBadge = u.role === 'Admin'
+      ? `<span class="pill pill-err" title="Super Admin has all operational powers">👑 Full Admin (10 Powers)</span>`
+      : `<button type="button" class="pill pill-ok" data-powers-user="${u.id}" style="cursor:pointer;border:none;display:inline-flex;align-items:center;gap:4px;" title="Click to view/edit powers">⚡ ${count} Powers Active ✎</button>`;
+
+    return `
     <tr>
-      <td>${esc(u.name)}</td>
-      <td>${esc(u.username)}</td>
+      <td><b>${esc(u.name)}</b></td>
+      <td><span style="font-family:'IBM Plex Mono',monospace;font-size:12px;background:#F1F5F9;padding:2px 6px;border-radius:3px;">@${esc(u.username)}</span></td>
       <td><span class="pill ${u.role === 'Admin' ? 'pill-err' : u.role === 'Supervisor' ? 'pill-warn' : 'pill-ok'}">${esc(u.role)}</span></td>
-      <td>
+      <td>${powerBadge}</td>
+      <td style="white-space:nowrap;">
+        <button class="btn btn-primary btn-sm" data-powers-user="${u.id}" title="Grant or revoke specific powers">⚡ Powers</button>
         <button class="btn btn-secondary btn-sm" data-edit-user="${u.id}">Edit</button>
         ${String(u.id) !== String(state.user.id) ? `<button class="btn btn-danger btn-sm" data-del-user="${u.id}">Delete</button>` : ''}
       </td>
-    </tr>`).join('') || `<tr><td colspan="4" class="empty">No users loaded.</td></tr>`;
+    </tr>`;
+  }).join('') || `<tr><td colspan="5" class="empty">No users loaded.</td></tr>`;
+
   return `
-  <h1 class="page-title">Manage Users</h1>
-  <p class="page-sub">Create staff accounts from the panel — Admin, Agent, or Supervisor.</p>
+  <h1 class="page-title">Users & Dynamic Powers</h1>
+  <p class="page-sub">Create staff accounts and dynamically grant or revoke specific operational powers.</p>
   <div class="panel">
     <div class="panel-head">
-      <h3>Users</h3>
-      <button class="btn btn-primary" id="addUserBtn">Add User</button>
+      <h3>Staff Accounts (${usersCache ? usersCache.length : 0})</h3>
+      <button class="btn btn-primary" id="addUserBtn">+ Add User</button>
     </div>
     <div style="overflow-x:auto;"><table>
-      <thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Actions</th></tr></thead>
+      <thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Active Powers</th><th>Actions</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
   </div>`;
@@ -3606,6 +3680,12 @@ async function attachAdminUsers() {
     btn.onclick = () => {
       const user = usersCache.find((u) => String(u.id) === btn.getAttribute('data-edit-user'));
       if (user) openUserForm(user);
+    };
+  });
+  document.querySelectorAll('[data-powers-user]').forEach((btn) => {
+    btn.onclick = () => {
+      const user = usersCache.find((u) => String(u.id) === btn.getAttribute('data-powers-user'));
+      if (user) openUserPermissionsModal(user);
     };
   });
   document.querySelectorAll('[data-del-user]').forEach((btn) => {
@@ -3655,7 +3735,6 @@ function openUserForm(user) {
         if (state.user && String(state.user.id) === String(user.id)) {
           state.user.name = updated.name;
           state.user.role = updated.role;
-          renderNav();
         }
         toast('User updated');
       } else {
@@ -3669,8 +3748,265 @@ function openUserForm(user) {
   });
 }
 
+/* ---------- Dynamic Powers Modal ---------- */
+function openUserPermissionsModal(user) {
+  const currentPerms = { ...(user.permissions || {}) };
+
+  const countActive = () => Object.values(currentPerms).filter(Boolean).length;
+
+  const renderModalBody = () => {
+    const totalCount = 10;
+    const active = countActive();
+
+    const categoriesHtml = PERMISSION_DEFINITIONS.map((cat) => {
+      const itemsHtml = cat.perms.map((p) => {
+        const checked = Boolean(currentPerms[p.key]);
+        return `
+          <div class="power-item">
+            <div class="power-item-info">
+              <label for="perm_${p.key}">${esc(p.name)}</label>
+              <div class="power-desc">${esc(p.desc)}</div>
+            </div>
+            <div class="power-toggle-wrap">
+              <label class="power-switch">
+                <input type="checkbox" id="perm_${p.key}" data-perm-key="${p.key}" ${checked ? 'checked' : ''}>
+                <span class="power-slider"></span>
+              </label>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      return `
+        <div class="powers-category">
+          <div class="powers-category-title">${esc(cat.category)}</div>
+          ${itemsHtml}
+        </div>
+      `;
+    }).join('');
+
+    return `
+      <div style="margin-bottom:12px;">
+        <p style="font-size:13px;color:var(--ink-soft);margin-bottom:10px;">
+          Assign specific powers to <b>${esc(user.name)}</b> (<code>@${esc(user.username)}</code>). Powers apply immediately.
+        </p>
+        <div class="powers-preset-bar">
+          <span style="font-size:12px;font-weight:700;color:var(--ink-soft);">Quick Presets:</span>
+          <button type="button" class="btn btn-secondary btn-sm" id="presetFull">👑 Full Admin</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="presetAgent">🎟️ Booking Agent</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="presetSupervisor">📋 Conductor / Supervisor</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="presetClear">Clear All</button>
+        </div>
+      </div>
+
+      <div style="max-height:50vh;overflow-y:auto;padding-right:4px;">
+        ${categoriesHtml}
+      </div>
+
+      <div class="powers-foot-bar">
+        <span id="powersCountLabel" style="font-size:12.5px;font-weight:600;color:var(--ink-soft);">
+          Active Powers: <b style="color:var(--ok);">${active}</b> / ${totalCount}
+        </span>
+      </div>
+    `;
+  };
+
+  openFormModal({
+    title: `⚡ Manage Powers: ${esc(user.name)}`,
+    submitLabel: 'Save Powers',
+    bodyHtml: renderModalBody(),
+    wide: true,
+    onSubmit: async () => {
+      const updated = await api(`/users/${user.id}/permissions`, {
+        method: 'PATCH',
+        body: JSON.stringify({ permissions: currentPerms })
+      });
+      user.permissions = updated.permissions;
+      if (state.user && String(state.user.id) === String(user.id)) {
+        state.user.permissions = updated.permissions;
+      }
+      toast(`Powers updated for ${user.name}`);
+      await loadUsers();
+      nav('#/admin/users');
+    }
+  });
+
+  // Attach dynamic switch toggles and presets inside the modal
+  const updateSwitchesFromState = () => {
+    document.querySelectorAll('[data-perm-key]').forEach((input) => {
+      const key = input.getAttribute('data-perm-key');
+      input.checked = Boolean(currentPerms[key]);
+    });
+    const label = document.getElementById('powersCountLabel');
+    if (label) {
+      label.innerHTML = `Active Powers: <b style="color:var(--ok);">${countActive()}</b> / 10`;
+    }
+  };
+
+  document.querySelectorAll('[data-perm-key]').forEach((input) => {
+    input.onchange = (e) => {
+      const key = input.getAttribute('data-perm-key');
+      currentPerms[key] = e.target.checked;
+      const label = document.getElementById('powersCountLabel');
+      if (label) {
+        label.innerHTML = `Active Powers: <b style="color:var(--ok);">${countActive()}</b> / 10`;
+      }
+    };
+  });
+
+  const presetFullBtn = document.getElementById('presetFull');
+  if (presetFullBtn) {
+    presetFullBtn.onclick = () => {
+      PERMISSION_DEFINITIONS.forEach(cat => cat.perms.forEach(p => { currentPerms[p.key] = true; }));
+      updateSwitchesFromState();
+    };
+  }
+
+  const presetAgentBtn = document.getElementById('presetAgent');
+  if (presetAgentBtn) {
+    presetAgentBtn.onclick = () => {
+      PERMISSION_DEFINITIONS.forEach(cat => cat.perms.forEach(p => { currentPerms[p.key] = false; }));
+      currentPerms.can_book = true;
+      currentPerms.can_cancel = true;
+      updateSwitchesFromState();
+    };
+  }
+
+  const presetSupBtn = document.getElementById('presetSupervisor');
+  if (presetSupBtn) {
+    presetSupBtn.onclick = () => {
+      PERMISSION_DEFINITIONS.forEach(cat => cat.perms.forEach(p => { currentPerms[p.key] = false; }));
+      currentPerms.can_manifest = true;
+      currentPerms.can_collect_payment = true;
+      currentPerms.can_cancel = true;
+      currentPerms.can_view_logs = true;
+      updateSwitchesFromState();
+    };
+  }
+
+  const presetClearBtn = document.getElementById('presetClear');
+  if (presetClearBtn) {
+    presetClearBtn.onclick = () => {
+      PERMISSION_DEFINITIONS.forEach(cat => cat.perms.forEach(p => { currentPerms[p.key] = false; }));
+      updateSwitchesFromState();
+    };
+  }
+}
+
+/* ---------- Admin: System Settings & Option 1 Domain ---------- */
+function adminSettingsView() {
+  return `
+  <h1 class="page-title">⚙️ System Settings & Passenger Domain</h1>
+  <p class="page-sub">Configure public passenger portal, company branding, and privacy settings.</p>
+
+  <div class="panel" style="max-width:680px;">
+    <div class="panel-head">
+      <h3>Passenger Portal & Privacy (Option 1)</h3>
+    </div>
+    
+    <div style="padding:18px 20px;">
+      <div class="field">
+        <label for="settingPortalUrl">🌐 Public Passenger Boarding Pass Domain (Option 1)</label>
+        <input id="settingPortalUrl" type="url" placeholder="https://seva-pass.vercel.app" value="${esc(sysSettings.passengerPortalUrl || '')}">
+        <p class="field-hint">
+          <b>Option 1 Security:</b> When set (e.g. <code>https://seva-pass.vercel.app</code>), all WhatsApp share links and passenger boarding passes will use this dedicated domain.
+          Passengers will <b>never see or know</b> your private staff portal URL (<code>seva-bus-booking.vercel.app</code>)!
+        </p>
+      </div>
+
+      <div class="field" style="margin-top:16px;">
+        <label for="settingCompanyName">🏢 Company / Service Name</label>
+        <input id="settingCompanyName" type="text" placeholder="Seva Bus Service" value="${esc(sysSettings.companyName || 'Seva Bus Service')}">
+        <p class="field-hint">Displayed on printed tickets, boarding passes, and WhatsApp notices.</p>
+      </div>
+
+      <div class="field" style="margin-top:16px;">
+        <label for="settingSupportPhone">📞 Customer Support Phone</label>
+        <input id="settingSupportPhone" type="text" placeholder="+91 98765 43210" value="${esc(sysSettings.supportPhone || '')}">
+        <p class="field-hint">Helpline number displayed to passengers on digital passes.</p>
+      </div>
+
+      <div style="margin-top:24px;border-top:1px solid var(--line);padding-top:16px;display:flex;justify-content:flex-end;">
+        <button class="btn btn-primary" id="saveSettingsBtn">💾 Save System Settings</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+async function loadPublicSettings() {
+  try {
+    const s = await api('/settings/public');
+    if (s) {
+      sysSettings = {
+        passengerPortalUrl: s.passengerPortalUrl || '',
+        companyName: s.companyName || 'Seva Bus Service',
+        supportPhone: s.supportPhone || ''
+      };
+      window.PASSENGER_PORTAL_URL = sysSettings.passengerPortalUrl;
+    }
+  } catch (e) {
+    /* ignore */
+  }
+}
+
+async function attachAdminSettings() {
+  try {
+    const data = await api('/settings');
+    if (data) {
+      sysSettings.passengerPortalUrl = data.passenger_portal_url || '';
+      sysSettings.companyName = data.company_name || 'Seva Bus Service';
+      sysSettings.supportPhone = data.support_phone || '';
+      window.PASSENGER_PORTAL_URL = sysSettings.passengerPortalUrl;
+      const u = document.getElementById('settingPortalUrl');
+      const c = document.getElementById('settingCompanyName');
+      const p = document.getElementById('settingSupportPhone');
+      if (u) u.value = sysSettings.passengerPortalUrl;
+      if (c) c.value = sysSettings.companyName;
+      if (p) p.value = sysSettings.supportPhone;
+    }
+  } catch (err) {
+    toast(err.message);
+  }
+
+  const saveBtn = document.getElementById('saveSettingsBtn');
+  if (saveBtn) {
+    saveBtn.onclick = async () => {
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving…';
+      try {
+        const portalUrl = (document.getElementById('settingPortalUrl').value || '').trim();
+        const companyName = (document.getElementById('settingCompanyName').value || '').trim();
+        const supportPhone = (document.getElementById('settingSupportPhone').value || '').trim();
+
+        const res = await api('/settings', {
+          method: 'POST',
+          body: JSON.stringify({
+            passenger_portal_url: portalUrl,
+            company_name: companyName,
+            support_phone: supportPhone
+          })
+        });
+
+        sysSettings.passengerPortalUrl = portalUrl;
+        sysSettings.companyName = companyName;
+        sysSettings.supportPhone = supportPhone;
+        window.PASSENGER_PORTAL_URL = portalUrl;
+
+        toast('Settings saved successfully!');
+      } catch (err) {
+        toast(err.message || 'Failed to save settings');
+      } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = '💾 Save System Settings';
+      }
+    };
+  }
+}
+
+
 /* ---------- Bootstrap ---------- */
 (async function init() {
+  loadPublicSettings();
   const hash = window.location.hash || '';
   if (hash.startsWith('#/pass/')) {
     state.route = hash;

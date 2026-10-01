@@ -8,6 +8,10 @@
     {
       "source": "/ticket",
       "destination": "/ticket.html"
+    },
+    {
+      "source": "/pass",
+      "destination": "/ticket.html"
     }
   ]
 }

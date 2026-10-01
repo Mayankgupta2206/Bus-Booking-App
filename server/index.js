@@ -20,17 +20,36 @@ app.use(express.static(path.join(__dirname, '..', 'public'), {
     }
   }
 }));
+const isPassengerMode = process.env.PUBLIC_PASSENGER_MODE === 'true';
+
+app.use((req, res, next) => {
+  const host = (req.headers.host || '').toLowerCase();
+  req.isPassengerMode = isPassengerMode || host.includes('seva-pass') || host.includes('passenger-pass') || host.includes('ticket.');
+  next();
+});
+
 app.use(express.json());
 app.use('/api', api);
 app.use(api);
 
 // Dedicated Standalone Passenger Ticket Route (no staff code exposed)
-app.get('/ticket', (req, res) => {
+app.get(['/ticket', '/pass'], (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'ticket.html'));
 });
 
-// SPA fallback so refreshing on any client-side route still loads the app
+// Root route: If accessing from Passenger Pass domain, serve ticket.html directly (zero staff code)
+app.get('/', (req, res, next) => {
+  if (req.isPassengerMode) {
+    return res.sendFile(path.join(__dirname, '..', 'public', 'ticket.html'));
+  }
+  next();
+});
+
+// SPA fallback
 app.get('*', (req, res) => {
+  if (req.isPassengerMode) {
+    return res.sendFile(path.join(__dirname, '..', 'public', 'ticket.html'));
+  }
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
 });
 
