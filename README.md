@@ -201,6 +201,25 @@ seva-bus-booking-app/
 
 ---
 
+## 🗑️ How to Delete / Reset Project Data
+
+You have two safe methods to reset or delete project data:
+
+### Method 1: Delete Test Bookings Only (Recommended for Launch)
+Wipes all passenger tickets, booked seats, and cancellations, but **keeps** your configured routes, buses, and staff user accounts:
+```bash
+npm run reset:bookings
+```
+
+### Method 2: Complete Factory Reset
+Wipes **everything** (all bookings, trips, buses, routes, and custom users) and restores a clean initial demo setup:
+```bash
+npm run reset:all
+```
+*Default admin login after factory reset: `admin` / `Admin@321`.*
+
+---
+
 ## 📄 License & Credits
 
 Developed with ❤️ for Seva Bus operations. Built for performance, security, and reliability.

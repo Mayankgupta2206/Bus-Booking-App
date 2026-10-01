@@ -7,7 +7,9 @@
   "scripts": {
     "start": "node server/index.js",
     "dev": "node server/index.js",
-    "backup": "node server/backup.js"
+    "backup": "node server/backup.js",
+    "reset:bookings": "node scripts/reset-db.js --bookings",
+    "reset:all": "node scripts/reset-db.js --all"
   },
   "dependencies": {
     "@libsql/client": "^0.18.0",
