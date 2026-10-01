@@ -22,6 +22,6 @@
     "libsql": "^0.5.29"
   },
   "engines": {
-    "node": "20.x"
+    "node": "24.x"
   }
 }
