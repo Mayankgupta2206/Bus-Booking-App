@@ -24,7 +24,7 @@ const isPassengerMode = process.env.PUBLIC_PASSENGER_MODE === 'true';
 
 app.use((req, res, next) => {
   const host = (req.headers.host || '').toLowerCase();
-  req.isPassengerMode = isPassengerMode || host.includes('seva-pass') || host.includes('passenger-pass') || host.includes('ticket.');
+  req.isPassengerMode = isPassengerMode || host.includes('pass') || host.includes('ticket');
   next();
 });
 

@@ -14,6 +14,15 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Spectral:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css?v=3">
+<script>
+(function() {
+  var h = window.location.hostname.toLowerCase();
+  var isPassengerSite = h.includes('pass') || h.includes('ticket') || window.PUBLIC_PASSENGER_MODE;
+  if (isPassengerSite && window.location.pathname !== '/ticket' && window.location.pathname !== '/ticket.html' && window.location.pathname !== '/pass') {
+    window.location.replace('/ticket' + window.location.search);
+  }
+})();
+</script>
 </head>
 <body>
 <div id="app"></div>

@@ -283,7 +283,7 @@ async function loadCaches() {
 
 function render() {
   const host = window.location.hostname.toLowerCase();
-  if (host.includes('seva-pass') || host.includes('passenger-pass') || host.includes('ticket.')) {
+  if (host.includes('pass') || host.includes('ticket') || window.PUBLIC_PASSENGER_MODE) {
     window.location.replace('/ticket' + window.location.search);
     return;
   }
