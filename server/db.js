@@ -2,8 +2,14 @@ const path = require('path');
 const fs = require('fs');
 const bcrypt = require('bcryptjs');
 
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'seva.db');
-fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+const isVercel = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+const defaultDataDir = isVercel ? '/tmp' : path.join(__dirname, '..', 'data');
+const DB_PATH = process.env.DB_PATH || path.join(defaultDataDir, 'seva.db');
+try {
+  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+} catch (e) {
+  console.warn('Directory create notice:', e.message);
+}
 
 let db;
 const isTurso = Boolean(process.env.TURSO_DATABASE_URL && process.env.TURSO_AUTH_TOKEN);

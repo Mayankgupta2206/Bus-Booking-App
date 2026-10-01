@@ -229,6 +229,12 @@ async function loadCaches() {
 
 function render() {
   const app = document.getElementById('app');
+  const h = window.location.hash || state.route || '';
+  if (h.startsWith('#/pass/')) {
+    state.route = h;
+    renderPublicPass();
+    return;
+  }
   if (!state.user) { app.innerHTML = renderLogin(); attachLogin(); return; }
   app.innerHTML = renderShell();
   attachShell();
@@ -453,30 +459,47 @@ function attachRoute() {
 const WA_ICON_SVG = '<svg class="wa-icon" viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true" style="vertical-align:-2px;display:inline-block;flex-shrink:0;"><path d="M12.04 2C6.5 2 2 6.5 2 12.04c0 1.85.5 3.66 1.46 5.25L2 22l4.87-1.42c1.53.9 3.29 1.38 5.17 1.38 5.54 0 10.04-4.5 10.04-10.04C22.08 6.5 17.58 2 12.04 2zm0 18.27c-1.63 0-3.17-.46-4.51-1.28l-.32-.2-3.35.98.9-3.26-.22-.35A8.15 8.15 0 013.88 12c0-4.51 3.66-8.17 8.16-8.17 4.5 0 8.16 3.66 8.16 8.17 0 4.5-3.66 8.27-8.16 8.27zm4.72-6.14c-.26-.13-1.53-.76-1.77-.85-.24-.09-.41-.13-.58.13-.17.26-.67.85-.82 1.02-.15.17-.3.2-.56.06-.26-.13-1.09-.4-2.08-1.28-.77-.69-1.29-1.54-1.44-1.8-.15-.26-.02-.4.11-.53.12-.12.26-.3.39-.46.13-.15.17-.26.26-.43.09-.17.04-.32-.02-.45-.06-.13-.58-1.41-.8-1.93-.21-.51-.43-.44-.59-.45h-.5c-.17 0-.45.06-.69.32-.24.26-.91.89-.91 2.17 0 1.28.93 2.51 1.06 2.68.13.17 1.83 2.79 4.43 3.91.62.27 1.1.43 1.48.55.62.2 1.19.17 1.63.1.5-.07 1.53-.63 1.75-1.23.21-.61.21-1.13.15-1.23-.07-.1-.24-.17-.5-.3z"/></svg>';
 
 function shareTicketWhatsapp(booking, trip) {
-  const pnr = booking.pnr || '';
+  const pnr = (booking.pnr || '').toUpperCase();
   const route = trip?.route_name || booking.route_name || 'Seva Bus';
   const date = fmtDate(trip?.date || booking.trip_date);
   const time = trip?.time || booking.trip_time || '';
   const bus = trip?.bus_name || booking.bus_name || 'Seva Bus';
-  const seats = (booking.seats || []).map((s) => s.seat_label).join(', ');
-  const passengerNames = (booking.seats || []).map((s) => `${s.passenger_name || 'Passenger'} (${s.seat_label})`).join(', ');
+  const seats = booking.seats || [];
+  const seatListStr = seats.map((s) => s.seat_label).join(', ');
   const total = fmtMoney(booking.total_amount);
   const paid = fmtMoney(booking.amount_paid);
   const status = booking.paid_status || 'Unpaid';
   const due = Math.max(0, Number(booking.total_amount || 0) - Number(booking.amount_paid || 0));
   const pickup = booking.pickup_point ? `\n📍 *Pickup Stop:* ${booking.pickup_point}` : '';
 
+  const passengerDetails = seats.length > 0
+    ? seats.map((s) => {
+      const info = [s.age ? `${s.age}y` : '', s.gender].filter(Boolean).join(' · ');
+      return `• *Seat ${s.seat_label}:* ${s.passenger_name || 'Passenger'}${info ? ` (${info})` : ''}`;
+    }).join('\n')
+    : `• *Seat(s):* ${seatListStr}`;
+
+  const passUrl = `${window.location.origin}/#/pass/${encodeURIComponent(pnr)}`;
+
   const lines = [
-    '🎫 *SEVA BUS BOOKING PASS*',
+    '═══════════════════════════',
+    '🎫 *SEVA BUS BOARDING PASS* 🎫',
+    '═══════════════════════════',
     `*PNR:* ${pnr}`,
     `📍 *Route:* ${route}`,
-    `📅 *Date & Time:* ${date} at ${time}`,
+    `📅 *Date & Departure:* ${date} at ${time}`,
     `🚌 *Bus:* ${bus}${pickup}`,
-    `💺 *Seat(s):* ${seats}`,
-    `👤 *Passenger(s):* ${passengerNames}`,
+    `💺 *Seat(s):* ${seatListStr}`,
+    '',
+    '👤 *PASSENGER DETAILS:*',
+    passengerDetails,
+    '',
     `💵 *Fare:* ${total} · Paid: ${paid} (${status})${due > 0 ? ` · *Due at Boarding:* ₹${due.toFixed(2)}` : ''}`,
     '',
-    '🙏 *Thank you for choosing Seva Bus. Have a safe and pleasant journey!*'
+    '🎟️ *View Digital Boarding Pass & QR Code:*',
+    passUrl,
+    '═══════════════════════════',
+    '🙏 *Thank you for choosing Seva Bus. Have a safe journey!*'
   ];
 
   const text = lines.join('\n');
@@ -489,6 +512,135 @@ function shareTicketWhatsapp(booking, trip) {
     : `https://wa.me/?text=${encodedText}`;
 
   window.open(url, '_blank');
+}
+
+/* ---------- Public Digital Boarding Pass Page ---------- */
+async function renderPublicPass() {
+  const app = document.getElementById('app');
+  const hash = window.location.hash || state.route || '';
+  const pnr = hash.replace('#/pass/', '').trim().toUpperCase();
+
+  if (!pnr) {
+    app.innerHTML = `
+      <div class="center-shell">
+        <div class="login-card" style="text-align:center;">
+          <div class="login-mark">S</div>
+          <h2>Boarding Pass Lookup</h2>
+          <p style="font-size:13px;color:var(--ink-soft);margin:10px 0 16px;">Please provide a valid booking PNR number.</p>
+          <a href="#/login" class="btn btn-secondary">Go to Login</a>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  app.innerHTML = `
+    <div style="min-height:100vh;background:var(--ivory);padding:24px 16px;display:flex;flex-direction:column;align-items:center;justify-content:center;">
+      <div style="text-align:center;margin-bottom:16px;">
+        <span class="spin" style="width:24px;height:24px;border-width:3px;"></span>
+        <div style="font-size:13px;color:var(--ink-soft);margin-top:8px;">Loading Digital Boarding Pass…</div>
+      </div>
+    </div>
+  `;
+
+  try {
+    const res = await fetch('/api/public/pass/' + encodeURIComponent(pnr));
+    let data = null;
+    try { data = await res.json(); } catch {}
+    if (!res.ok) throw new Error((data && data.error) || 'Boarding Pass not found for PNR ' + pnr);
+
+    const b = data;
+    const seats = b.seats || [];
+    const seatListStr = seats.map((s) => s.seat_label).join(', ');
+    const bal = Math.max(0, Number(b.total_amount || 0) - Number(b.amount_paid || 0));
+    const stampClass = b.paid_status === 'Paid' ? 'stamp-paid' : b.paid_status === 'Partial' ? 'stamp-partial' : 'stamp-unpaid';
+
+    const rows = seats.map((s) => `
+      <tr>
+        <td><b>${esc(s.seat_label)}</b></td>
+        <td>${esc(s.passenger_name || 'Passenger')}</td>
+        <td>${esc(s.age || '—')} / ${esc(s.gender || '—')}</td>
+        <td>${s.boarded ? '<span style="color:var(--ok);font-weight:600;">✓ Boarded</span>' : '<span style="color:var(--ink-soft);">Confirmed</span>'}</td>
+      </tr>
+    `).join('');
+
+    app.innerHTML = `
+      <div style="min-height:100vh;background:#F8F6F0;padding:24px 16px;box-sizing:border-box;">
+        <div style="max-width:540px;margin:0 auto;">
+          <div class="ticket-wrap" id="publicPrintableTicket" style="background:#fff;border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,0.06);position:relative;">
+            <div class="ticket-stamp ${stampClass}">${esc(b.paid_status)}</div>
+            <div class="ticket-head">
+              <div class="ticket-badge">SEVA BUS SERVICE</div>
+              <h2 style="margin:4px 0 2px;font-size:22px;letter-spacing:0.02em;">PASSENGER BOARDING PASS</h2>
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:14px;color:var(--ink-soft);">
+                PNR: <b style="color:var(--ink);letter-spacing:0.04em;">${esc(b.pnr)}</b>
+              </div>
+            </div>
+
+            <div class="ticket-meta">
+              <div><b>Route:</b> ${esc(b.route_name || `${b.source} ➔ ${b.destination}`)}</div>
+              <div><b>Bus:</b> ${esc(b.bus_name || 'Seva Express')}</div>
+              <div><b>Date:</b> ${fmtDate(b.trip_date)}</div>
+              <div><b>Departure:</b> ${esc(b.trip_time)}</div>
+              <div><b>Seats (${seats.length}):</b> <span style="font-family:'IBM Plex Mono',monospace;font-weight:600;color:var(--maroon);">${esc(seatListStr)}</span></div>
+              <div><b>Status:</b> <b>${esc(b.paid_status)}</b></div>
+              ${b.pickup_point ? `<div style="grid-column:span 2;"><b>Pickup Stop:</b> 📍 ${esc(b.pickup_point)}</div>` : ''}
+            </div>
+
+            <div class="table-wrap">
+              <table style="margin-bottom:14px;">
+                <thead><tr><th>Seat</th><th>Passenger</th><th>Age/Gender</th><th>Status</th></tr></thead>
+                <tbody>${rows}</tbody>
+              </table>
+            </div>
+
+            <div class="summary-box" style="margin-top:8px;">
+              <span>Total Fare: <b>${fmtMoney(b.total_amount)}</b> · Paid: <b>${fmtMoney(b.amount_paid)}</b></span>
+              <span>Due: <b style="color:${bal > 0 ? 'var(--err)' : 'var(--ok)'};">${fmtMoney(bal)}</b></span>
+            </div>
+
+            <div class="ticket-qr-wrap" style="margin-top:16px;">
+              <div id="publicTicketQrArea" class="ticket-qr-box"></div>
+              <div style="font-size:11.5px;color:var(--ink-soft);text-align:right;">
+                <b>Show this QR code at boarding</b><br>
+                Conductor will scan to verify ticket<br>
+                <b style="color:var(--ink);font-family:'IBM Plex Mono',monospace;">PNR: ${esc(b.pnr)}</b>
+              </div>
+            </div>
+          </div>
+
+          <div class="no-print" style="margin-top:16px;display:flex;justify-content:space-between;align-items:center;gap:10px;">
+            <button class="btn btn-secondary btn-sm" onclick="window.print()">🖨️ Print Pass / Save PDF</button>
+            <span style="font-size:12px;color:var(--ink-soft);">Official Seva Bus E-Ticket</span>
+          </div>
+        </div>
+      </div>
+    `;
+
+    if (window.QRCode && document.getElementById('publicTicketQrArea')) {
+      try {
+        new QRCode(document.getElementById('publicTicketQrArea'), {
+          text: `SEVA-BUS|PNR:${b.pnr}|SEATS:${seatListStr}|FARE:${b.total_amount}|STATUS:${b.paid_status}`,
+          width: 90,
+          height: 90,
+          colorDark: '#1E293B',
+          colorLight: '#FFFFFF',
+          correctLevel: QRCode.CorrectLevel.M
+        });
+      } catch (e) { console.warn('QR render error:', e); }
+    }
+  } catch (err) {
+    app.innerHTML = `
+      <div style="min-height:100vh;background:var(--ivory);padding:24px 16px;display:flex;flex-direction:column;align-items:center;justify-content:center;">
+        <div class="panel" style="max-width:440px;width:100%;text-align:center;padding:24px;">
+          <div style="font-size:36px;margin-bottom:8px;">🎫</div>
+          <h3 style="color:var(--err);margin-bottom:8px;">Boarding Pass Not Found</h3>
+          <p style="font-size:13px;color:var(--ink-soft);margin-bottom:18px;">${esc(err.message)}</p>
+          <div style="font-size:12px;color:var(--ink-soft);">Please check your PNR number or contact Seva Bus support.</div>
+        </div>
+      </div>
+    `;
+  }
 }
 
 function openTicketModal(booking, trip) {
@@ -3519,6 +3671,12 @@ function openUserForm(user) {
 
 /* ---------- Bootstrap ---------- */
 (async function init() {
+  const hash = window.location.hash || '';
+  if (hash.startsWith('#/pass/')) {
+    state.route = hash;
+    render();
+    return;
+  }
   const token = getToken();
   if (token) {
     try {
@@ -3537,6 +3695,11 @@ function openUserForm(user) {
 
 window.addEventListener('hashchange', () => {
   const h = window.location.hash || '#/dashboard';
+  if (h.startsWith('#/pass/')) {
+    state.route = h;
+    render();
+    return;
+  }
   if (state.user && state.route !== h) {
     nav(h, false);
   }

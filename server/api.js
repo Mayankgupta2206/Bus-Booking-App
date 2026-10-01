@@ -12,9 +12,9 @@ const router = express.Router();
 
 // Rate limiter for login to prevent brute force
 const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 25, // limit each IP to 25 login requests per 15 min
-  message: { error: 'Too many login attempts from this IP. Please try again after 15 minutes.' },
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  max: 25, // limit each IP to 25 login requests per 10 min
+  message: { error: 'Too many login attempts from this IP. Please try again after 10 minutes.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -552,6 +552,37 @@ router.get('/bookings/search', requireAuth, (req, res) => {
   `).all(term, term, term, term, term);
 
   res.json({ bookings: withSeats, cancelled });
+});
+
+/* ---------- Public Pass Lookup (No auth required for passengers) ---------- */
+router.get('/public/pass/:pnr', (req, res) => {
+  const pnr = String(req.params.pnr || '').trim().toUpperCase();
+  if (!pnr) return res.status(400).json({ error: 'PNR is required.' });
+
+  const b = db.prepare(`
+    SELECT b.id, b.pnr, b.trip_id, b.total_amount, b.amount_paid, b.paid_status,
+           b.pickup_point, b.group_contact, b.booked_by, b.created_at,
+           t.date AS trip_date, t.time AS trip_time, t.status AS trip_status,
+           r.name AS route_name, r.source, r.destination, bu.name AS bus_name
+    FROM bookings b
+    JOIN trips t ON t.id = b.trip_id
+    JOIN routes r ON r.id = t.route_id
+    JOIN buses bu ON bu.id = t.bus_id
+    WHERE UPPER(b.pnr) = ?
+  `).get(pnr);
+
+  if (!b) {
+    return res.status(404).json({ error: 'Boarding Pass not found for PNR ' + pnr });
+  }
+
+  const seats = db.prepare(`
+    SELECT id, seat_label, passenger_name, age, gender, contact, boarded
+    FROM booking_seats
+    WHERE booking_id = ?
+    ORDER BY seat_label ASC
+  `).all(b.id);
+
+  res.json({ ...b, seats });
 });
 
 router.get('/bookings/:id', requireAuth, (req, res) => {

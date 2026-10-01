@@ -29,6 +29,10 @@ app.get('*', (req, res) => {
 });
 
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
-  console.log(`Seva Bus Booking server running on http://localhost:${PORT}`);
-});
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`Seva Bus Booking server running on http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;
