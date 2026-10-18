@@ -41,10 +41,36 @@ try {
   /* Libsql pragma notice */
 }
 
+let isSyncing = false;
+let syncQueued = false;
+
 db.syncCloud = () => {
-  if (isTurso && typeof db.sync === 'function') {
-    try { db.sync(); } catch (err) { /* background sync */ }
+  if (!isTurso || typeof db.sync !== 'function') return;
+
+  if (isSyncing) {
+    syncQueued = true;
+    return;
   }
+
+  // Non-blocking background sync: HTTP requests return immediately to client
+  setImmediate(() => {
+    if (isSyncing) {
+      syncQueued = true;
+      return;
+    }
+    isSyncing = true;
+    try {
+      db.sync();
+    } catch (err) {
+      // Suppress transient sync errors gracefully
+    } finally {
+      isSyncing = false;
+      if (syncQueued) {
+        syncQueued = false;
+        setTimeout(() => db.syncCloud(), 150);
+      }
+    }
+  });
 };
 
 db.exec(`

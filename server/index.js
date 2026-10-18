@@ -7,16 +7,20 @@ const api = require('./api');
 const app = express();
 app.use(cors());
 app.use(express.static(path.join(__dirname, '..', 'public'), {
-  etag: false,
-  maxAge: 0,
+  etag: true,
+  maxAge: '1h',
   setHeaders: (res, filePath) => {
     if (filePath.endsWith('.js')) {
       res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
     }
-    if (filePath.endsWith('.html') || filePath.endsWith('.js') || filePath.endsWith('.css')) {
+    if (filePath.endsWith('.html')) {
+      // HTML is never cached so app updates are immediate
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.setHeader('Pragma', 'no-cache');
       res.setHeader('Expires', '0');
+    } else {
+      // Static JS, CSS, and icons can use conditional ETag and stale-while-revalidate
+      res.setHeader('Cache-Control', 'public, max-age=1800, stale-while-revalidate=86400');
     }
   }
 }));

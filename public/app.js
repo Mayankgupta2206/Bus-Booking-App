@@ -233,8 +233,13 @@ let dashboardCtx = { stats: null, loaded: false, loading: false };
 /* ---------- Inactivity Auto-Logout (15 Minutes) ---------- */
 const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
 let inactivityTimer = null;
+let lastInactivityReset = 0;
 
 function resetInactivityTimer() {
+  const now = Date.now();
+  if (now - lastInactivityReset < 15000 && inactivityTimer) return;
+  lastInactivityReset = now;
+
   if (inactivityTimer) clearTimeout(inactivityTimer);
   if (!state.user) return;
   inactivityTimer = setTimeout(() => {
@@ -249,7 +254,7 @@ function resetInactivityTimer() {
   window.addEventListener(evt, resetInactivityTimer, { passive: true });
 });
 
-function nav(path, pushHash = true) {
+function nav(path, pushHash = true, scrollToTop = true) {
   if (path.startsWith('#/booking') && !hasPerm('can_book')) { toast('Access restricted: Missing booking power'); path = '#/dashboard'; }
   if (path.startsWith('#/manifest') && !hasPerm('can_manifest')) { toast('Access restricted: Missing manifest power'); path = '#/dashboard'; }
   if (path === '#/admin/buses' && !hasPerm('can_manage_buses')) { toast('Access restricted: Missing bus fleet power'); path = '#/dashboard'; }
@@ -262,7 +267,7 @@ function nav(path, pushHash = true) {
     window.location.hash = path;
   }
   render();
-  window.scrollTo(0, 0);
+  if (scrollToTop) window.scrollTo(0, 0);
 }
 function logout() {
   if (inactivityTimer) { clearTimeout(inactivityTimer); inactivityTimer = null; }
@@ -449,16 +454,25 @@ function attachShell() {
     };
   });
 
-  document.addEventListener('click', (e) => {
-    if (navWrap && !navWrap.contains(e.target) && e.target !== menuToggle) {
-      navWrap.classList.remove('mobile-open');
-    }
-  });
+  if (!window._shellGlobalClickListener) {
+    window._shellGlobalClickListener = (e) => {
+      const wrap = document.getElementById('navLinksWrap');
+      const toggle = document.getElementById('mobileMenuToggle');
+      if (wrap && !wrap.contains(e.target) && e.target !== toggle) {
+        wrap.classList.remove('mobile-open');
+      }
+      const umDrop = document.getElementById('umDrop');
+      const umBtn = document.getElementById('umBtn');
+      if (umDrop && !umDrop.contains(e.target) && e.target !== umBtn) {
+        umDrop.classList.add('hidden');
+      }
+    };
+    document.addEventListener('click', window._shellGlobalClickListener);
+  }
 
   const umBtn = document.getElementById('umBtn'), umDrop = document.getElementById('umDrop');
   if (umBtn && umDrop) {
     umBtn.onclick = (e) => { e.stopPropagation(); umDrop.classList.toggle('hidden'); };
-    document.addEventListener('click', () => umDrop.classList.add('hidden'), { once: true });
   }
 
   const logoutBtn = document.getElementById('logoutBtn');
@@ -953,80 +967,131 @@ function downloadManifestCsv(trip, bookings) {
 }
 
 /* ---------- Dashboard ---------- */
+function renderDashboardMetricsHtml(stats) {
+  if (!dashboardCtx.loaded) {
+    return `<div class="panel"><div class="empty"><span class="spin"></span>Loading live dashboard metrics...</div></div>`;
+  }
+  if (!stats) return '';
+  return `
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Today's Scheduled Trips</div>
+        <div class="stat-val">${stats.tripsCount}</div>
+        <div class="stat-sub">${stats.plannedCount} Planned · ${stats.inTransitCount} In-Transit · ${stats.completedCount} Done</div>
+      </div>
+      <div class="stat-card stat-teal">
+        <div class="stat-label">Today's Occupancy</div>
+        <div class="stat-val">${stats.occupancyRate}%</div>
+        <div class="stat-sub">${stats.totalBooked} booked / ${stats.totalCapacity} capacity (${stats.availableSeats} open)</div>
+      </div>
+      <div class="stat-card stat-saffron">
+        <div class="stat-label">Today's Collections</div>
+        <div class="stat-val">${fmtMoney(stats.collectedToday)}</div>
+        <div class="stat-sub" style="font-size:11.5px;margin-top:4px;">
+          💵 Cash: <b>${fmtMoney(stats.cashCollectedToday || 0)}</b> · 📱 UPI: <b>${fmtMoney(stats.upiCollectedToday || 0)}</b>${(stats.cardCollectedToday || 0) > 0 ? ' · 💳 Card: <b>' + fmtMoney(stats.cardCollectedToday) + '</b>' : ''}
+        </div>
+        <div class="stat-sub" style="margin-top:2px;">${fmtMoney(stats.dueToday)} pending balance today</div>
+      </div>
+      <div class="stat-card stat-blue">
+        <div class="stat-label">Total Outstanding Dues</div>
+        <div class="stat-val">${fmtMoney(stats.totalDueAllTime)}</div>
+        <div class="stat-sub">Across all active scheduled trips</div>
+      </div>
+    </div>
+  `;
+}
+
+function renderDashboardRecentHtml(stats) {
+  if (!stats || !stats.recentBookings || stats.recentBookings.length === 0) {
+    return '';
+  }
+  const rows = stats.recentBookings.map((b) => {
+    return `
+      <tr>
+        <td><span class="pnr">${esc(b.pnr)}</span></td>
+        <td>${esc(b.route_name)}</td>
+        <td>${fmtDate(b.trip_date)}, ${esc(b.trip_time)}</td>
+        <td>${esc(b.bus_name)}</td>
+        <td><b>${b.seat_count}</b> seat(s)</td>
+        <td>${fmtMoney(b.total_amount)}</td>
+        <td>${paidPill(b.paid_status)}</td>
+        <td>
+          <button class="btn btn-secondary btn-sm" data-quick-ticket="${b.id}">Ticket</button>
+          ${(canManage() || roleIs('Supervisor') || b.booked_by_username === state.user.username)
+        ? `<button class="btn btn-danger btn-sm" data-quick-cancel="${b.id}" data-pnr="${esc(b.pnr)}">Cancel</button>`
+        : ''}
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  return `
+    <div class="panel no-print" style="margin-top:20px;">
+      <div class="panel-head">
+        <h3>Recent Bookings</h3>
+        <button class="btn btn-secondary btn-sm" data-nav="#/search">Search All Bookings</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>PNR</th><th>Route</th><th>Departure</th><th>Bus</th><th>Seats</th><th>Total</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function attachDashboardRecentActions(container = document) {
+  container.querySelectorAll('[data-nav]').forEach((el) => {
+    el.onclick = () => nav(el.getAttribute('data-nav'));
+  });
+
+  container.querySelectorAll('[data-quick-ticket]').forEach((btn) => {
+    btn.onclick = async () => {
+      const bId = btn.getAttribute('data-quick-ticket');
+      btn.disabled = true;
+      try {
+        const b = await api('/bookings/' + bId);
+        if (b) {
+          openTicketModal(b, {
+            route_name: b.route_name,
+            bus_name: b.bus_name,
+            date: b.trip_date,
+            time: b.trip_time,
+          });
+        }
+      } catch (e) {
+        toast(e.message);
+      } finally {
+        btn.disabled = false;
+      }
+    };
+  });
+
+  container.querySelectorAll('[data-quick-cancel]').forEach((btn) => {
+    btn.onclick = () => {
+      const bId = btn.getAttribute('data-quick-cancel');
+      const pnr = btn.getAttribute('data-pnr');
+      cancelBookingPrompt(bId, pnr, async () => {
+        dashboardCtx.stats = await api('/dashboard/stats');
+        updateDashboardInPlace();
+      });
+    };
+  });
+}
+
+function updateDashboardInPlace() {
+  const mWrap = document.getElementById('dashMetricsWrap');
+  if (mWrap) mWrap.innerHTML = renderDashboardMetricsHtml(dashboardCtx.stats);
+  const rWrap = document.getElementById('dashRecentWrap');
+  if (rWrap) {
+    rWrap.innerHTML = renderDashboardRecentHtml(dashboardCtx.stats);
+    attachDashboardRecentActions(rWrap);
+  }
+}
+
 function dashboardView() {
   const stats = dashboardCtx.stats;
-
-  let metricsHtml = '';
-  if (!dashboardCtx.loaded) {
-    metricsHtml = `<div class="panel"><div class="empty"><span class="spin"></span>Loading live dashboard metrics...</div></div>`;
-  } else if (stats) {
-    metricsHtml = `
-      <div class="stats-grid">
-        <div class="stat-card">
-          <div class="stat-label">Today's Scheduled Trips</div>
-          <div class="stat-val">${stats.tripsCount}</div>
-          <div class="stat-sub">${stats.plannedCount} Planned · ${stats.inTransitCount} In-Transit · ${stats.completedCount} Done</div>
-        </div>
-        <div class="stat-card stat-teal">
-          <div class="stat-label">Today's Occupancy</div>
-          <div class="stat-val">${stats.occupancyRate}%</div>
-          <div class="stat-sub">${stats.totalBooked} booked / ${stats.totalCapacity} capacity (${stats.availableSeats} open)</div>
-        </div>
-        <div class="stat-card stat-saffron">
-          <div class="stat-label">Today's Collections</div>
-          <div class="stat-val">${fmtMoney(stats.collectedToday)}</div>
-          <div class="stat-sub" style="font-size:11.5px;margin-top:4px;">
-            💵 Cash: <b>${fmtMoney(stats.cashCollectedToday || 0)}</b> · 📱 UPI: <b>${fmtMoney(stats.upiCollectedToday || 0)}</b>${(stats.cardCollectedToday || 0) > 0 ? ' · 💳 Card: <b>' + fmtMoney(stats.cardCollectedToday) + '</b>' : ''}
-          </div>
-          <div class="stat-sub" style="margin-top:2px;">${fmtMoney(stats.dueToday)} pending balance today</div>
-        </div>
-        <div class="stat-card stat-blue">
-          <div class="stat-label">Total Outstanding Dues</div>
-          <div class="stat-val">${fmtMoney(stats.totalDueAllTime)}</div>
-          <div class="stat-sub">Across all active scheduled trips</div>
-        </div>
-      </div>
-    `;
-  }
-
-  let recentHtml = '';
-  if (stats && stats.recentBookings && stats.recentBookings.length > 0) {
-    const rows = stats.recentBookings.map((b) => {
-      const bal = Math.max(0, Number(b.total_amount || 0) - Number(b.amount_paid || 0));
-      return `
-        <tr>
-          <td><span class="pnr">${esc(b.pnr)}</span></td>
-          <td>${esc(b.route_name)}</td>
-          <td>${fmtDate(b.trip_date)}, ${esc(b.trip_time)}</td>
-          <td>${esc(b.bus_name)}</td>
-          <td><b>${b.seat_count}</b> seat(s)</td>
-          <td>${fmtMoney(b.total_amount)}</td>
-          <td>${paidPill(b.paid_status)}</td>
-          <td>
-            <button class="btn btn-secondary btn-sm" data-quick-ticket="${b.id}">Ticket</button>
-            ${(canManage() || roleIs('Supervisor') || b.booked_by_username === state.user.username)
-          ? `<button class="btn btn-danger btn-sm" data-quick-cancel="${b.id}" data-pnr="${esc(b.pnr)}">Cancel</button>`
-          : ''}
-          </td>
-        </tr>
-      `;
-    }).join('');
-
-    recentHtml = `
-      <div class="panel no-print" style="margin-top:20px;">
-        <div class="panel-head">
-          <h3>Recent Bookings</h3>
-          <button class="btn btn-secondary btn-sm" data-nav="#/search">Search All Bookings</button>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>PNR</th><th>Route</th><th>Departure</th><th>Bus</th><th>Seats</th><th>Total</th><th>Status</th><th>Actions</th></tr></thead>
-            <tbody>${rows}</tbody>
-          </table>
-        </div>
-      </div>
-    `;
-  }
 
   return `
   <div class="panel-head no-print" style="margin-bottom:12px;">
@@ -1040,7 +1105,7 @@ function dashboardView() {
     </div>
   </div>
 
-  <div class="no-print">${metricsHtml}</div>
+  <div class="no-print" id="dashMetricsWrap">${renderDashboardMetricsHtml(stats)}</div>
 
   <div class="panel no-print" style="margin-bottom:24px;">
     <div class="panel-head"><h3>Passenger &amp; PNR Quick Lookup</h3></div>
@@ -1059,7 +1124,7 @@ function dashboardView() {
     ${canManage() ? `<div class="tile"><h3>Manage Users</h3><p>Create Admin, Agent, or Supervisor accounts from the panel.</p><button class="btn btn-secondary" data-nav="#/admin/users">Manage Users</button></div>` : ''}
   </div>
 
-  ${recentHtml}
+  <div id="dashRecentWrap">${renderDashboardRecentHtml(stats)}</div>
   `;
 }
 
@@ -1071,7 +1136,7 @@ async function attachDashboard() {
     try {
       dashboardCtx.stats = await api('/dashboard/stats');
       dashboardCtx.loaded = true;
-      render();
+      updateDashboardInPlace();
     } catch (e) {
       toast(e.message);
     } finally {
@@ -1085,7 +1150,7 @@ async function attachDashboard() {
     try {
       dashboardCtx.stats = await api('/dashboard/stats');
       dashboardCtx.loaded = true;
-      render();
+      updateDashboardInPlace();
       toast('Metrics updated');
     } catch (e) { toast(e.message); }
     finally { rfBtn.disabled = false; }
@@ -1115,38 +1180,7 @@ async function attachDashboard() {
   const dsi = document.getElementById('dashSearchInput');
   if (dsi) dsi.addEventListener('keydown', (e) => { if (e.key === 'Enter') doDashSearch(); });
 
-  document.querySelectorAll('[data-quick-ticket]').forEach((btn) => {
-    btn.onclick = async () => {
-      const bId = btn.getAttribute('data-quick-ticket');
-      btn.disabled = true;
-      try {
-        const b = await api('/bookings/' + bId);
-        if (b) {
-          openTicketModal(b, {
-            route_name: b.route_name,
-            bus_name: b.bus_name,
-            date: b.trip_date,
-            time: b.trip_time,
-          });
-        }
-      } catch (e) {
-        toast(e.message);
-      } finally {
-        btn.disabled = false;
-      }
-    };
-  });
-
-  document.querySelectorAll('[data-quick-cancel]').forEach((btn) => {
-    btn.onclick = () => {
-      const bId = btn.getAttribute('data-quick-cancel');
-      const pnr = btn.getAttribute('data-pnr');
-      cancelBookingPrompt(bId, pnr, async () => {
-        dashboardCtx.stats = await api('/dashboard/stats');
-        render();
-      });
-    };
-  });
+  attachDashboardRecentActions(document);
 }
 
 /* ---------- Global Search View ---------- */
@@ -1420,17 +1454,13 @@ function seatMapHtml(grid, booked, selected, interactive) {
   return `<div class="seatmap-wrap"><div class="seatmap" style="grid-template-columns:repeat(${width},44px)">${cells}</div></div>`;
 }
 
-function bookingStep2() {
-  const { trip, seatData, mode } = bookingCtx;
-  const fare = Number(trip.fare) || 0;
-  const total = fare * bookingCtx.selected.length;
-  const map = seatMapHtml(seatData.grid, seatData.booked, bookingCtx.selected, true);
-
-  let paxHtml = '';
+function renderPaxCardsHtml() {
+  const { mode } = bookingCtx;
   if (bookingCtx.selected.length === 0) {
-    paxHtml = `<div class="empty">No seats selected. Click seats on the map.</div>`;
-  } else if (mode === 'group') {
-    paxHtml = `
+    return `<div class="empty">No seats selected. Click seats on the map.</div>`;
+  }
+  if (mode === 'group') {
+    return `
       <div class="pax-card">
         <h4>Group booking · ${bookingCtx.selected.length} seats (${bookingCtx.selected.map(esc).join(', ')})</h4>
         <div class="field"><label>Contact Phone (required)</label>
@@ -1466,28 +1496,127 @@ function bookingStep2() {
               </div></div>`;
     }).join('')}
       </div>`;
-  } else {
-    paxHtml = bookingCtx.selected.map((lab) => {
-      const p = bookingCtx.pax[lab] || {};
-      return `<div class="pax-card">
-        <h4>Seat ${esc(lab)}</h4>
-        <div class="field"><label>Passenger Name</label><input data-pax="${esc(lab)}|name" value="${esc(p.name || '')}" placeholder="Enter passenger name"></div>
-        <div class="formrow" style="margin-bottom:14px;">
-          <div class="field"><label>Age</label><input data-pax="${esc(lab)}|age" type="number" value="${esc(p.age || '')}" placeholder="e.g., 35"></div>
-          <div class="field"><label>Gender</label>
-            <select data-pax="${esc(lab)}|gender">
-              <option value="">Select</option>
-              <option ${p.gender === 'Male' ? 'selected' : ''}>Male</option>
-              <option ${p.gender === 'Female' ? 'selected' : ''}>Female</option>
-              <option ${p.gender === 'Other' ? 'selected' : ''}>Other</option>
-            </select>
-          </div>
-        </div>
-        <div class="field" style="margin-bottom:0;"><label>Phone Number (required)</label>
-          <input data-pax="${esc(lab)}|contact" value="${esc(p.contact || '')}" placeholder="10-digit mobile number"></div>
-      </div>`;
-    }).join('');
   }
+
+  return bookingCtx.selected.map((lab) => {
+    const p = bookingCtx.pax[lab] || {};
+    return `<div class="pax-card">
+      <h4>Seat ${esc(lab)}</h4>
+      <div class="field"><label>Passenger Name</label><input data-pax="${esc(lab)}|name" value="${esc(p.name || '')}" placeholder="Enter passenger name"></div>
+      <div class="formrow" style="margin-bottom:14px;">
+        <div class="field"><label>Age</label><input data-pax="${esc(lab)}|age" type="number" value="${esc(p.age || '')}" placeholder="e.g., 35"></div>
+        <div class="field"><label>Gender</label>
+          <select data-pax="${esc(lab)}|gender">
+            <option value="">Select</option>
+            <option ${p.gender === 'Male' ? 'selected' : ''}>Male</option>
+            <option ${p.gender === 'Female' ? 'selected' : ''}>Female</option>
+            <option ${p.gender === 'Other' ? 'selected' : ''}>Other</option>
+          </select>
+        </div>
+      </div>
+      <div class="field" style="margin-bottom:0;"><label>Phone Number (required)</label>
+        <input data-pax="${esc(lab)}|contact" value="${esc(p.contact || '')}" placeholder="10-digit mobile number"></div>
+    </div>`;
+  }).join('');
+}
+
+function renderBookingPayBoxHtml() {
+  if (!bookingCtx.selected.length) return '';
+  const fare = Number(bookingCtx.trip?.fare) || 0;
+  const total = fare * bookingCtx.selected.length;
+  return `
+    <div class="pay-box">
+      <h4>Payment</h4>
+      <div class="summary-box"><span>Seats</span><b>${bookingCtx.selected.length}</b></div>
+      <div class="summary-box"><span>Fare / seat</span><b>${fmtMoney(fare)}</b></div>
+      <div class="summary-box"><span>Total fare</span><b>${fmtMoney(total)}</b></div>
+      <div class="field" style="margin-top:12px;">
+        <label>Payment Method</label>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;" id="bookingMethodGroup">
+          <button type="button" class="btn btn-secondary ${(!bookingCtx.paymentMethod || bookingCtx.paymentMethod === 'Cash') ? 'active' : ''}" data-paymethod="Cash">💵 Cash</button>
+          <button type="button" class="btn btn-secondary ${bookingCtx.paymentMethod === 'UPI' ? 'active' : ''}" data-paymethod="UPI">📱 UPI</button>
+          <button type="button" class="btn btn-secondary ${bookingCtx.paymentMethod === 'Card' ? 'active' : ''}" data-paymethod="Card">💳 Card</button>
+        </div>
+      </div>
+      <div class="field" style="margin-top:12px;">
+        <label>Advance / amount paid now (₹)</label>
+        <input id="advancePaid" type="number" min="0" max="${total}" step="1" value="${esc(bookingCtx.advancePaid)}" placeholder="0 = unpaid, or enter advance">
+      </div>
+      <div class="summary-box"><span>Balance due</span><b id="balanceDue">${fmtMoney(Math.max(0, total - (Number(bookingCtx.advancePaid) || 0)))}</b></div>
+      <div class="summary-box"><span>Status</span><b id="payStatusLabel">${resolvePaidStatus(bookingCtx.advancePaid, total)}</b></div>
+      <div class="pay-quick">
+        <button type="button" class="btn btn-secondary btn-sm" id="payNone">Unpaid</button>
+        <button type="button" class="btn btn-secondary btn-sm" id="payHalf">Half advance</button>
+        <button type="button" class="btn btn-secondary btn-sm" id="payFull">Full paid</button>
+      </div>
+    </div>
+  `;
+}
+
+function attachPaxInputs() {
+  document.querySelectorAll('[data-pax]').forEach((el) => {
+    const sync = () => {
+      const [lab, field] = el.getAttribute('data-pax').split('|');
+      bookingCtx.pax[lab] = bookingCtx.pax[lab] || {};
+      bookingCtx.pax[lab][field] = el.value;
+    };
+    el.onchange = sync; el.oninput = sync;
+  });
+  const gc = document.getElementById('groupContact');
+  if (gc) { gc.oninput = () => { bookingCtx.groupContact = gc.value; }; }
+  const aa = document.getElementById('applyAll');
+  if (aa) aa.onchange = () => {
+    bookingCtx.applyAll = aa.checked;
+    const paxWrap = document.getElementById('bookingPaxWrap');
+    if (paxWrap) { paxWrap.innerHTML = renderPaxCardsHtml(); attachPaxInputs(); }
+  };
+  const ln = document.getElementById('leadName');
+  if (ln) ln.oninput = () => { bookingCtx.lead.name = ln.value; };
+  const la = document.getElementById('leadAge');
+  if (la) la.oninput = () => { bookingCtx.lead.age = la.value; };
+  const lg = document.getElementById('leadGender');
+  if (lg) lg.onchange = () => { bookingCtx.lead.gender = lg.value; };
+}
+
+function attachPayInputs() {
+  const ps = document.getElementById('advancePaid');
+  const syncPay = () => {
+    const fare = Number(bookingCtx.trip?.fare) || 0;
+    const total = fare * bookingCtx.selected.length;
+    const paid = Number(document.getElementById('advancePaid')?.value) || 0;
+    bookingCtx.advancePaid = document.getElementById('advancePaid')?.value || '';
+    const bal = document.getElementById('balanceDue');
+    const lab = document.getElementById('payStatusLabel');
+    if (bal) bal.textContent = fmtMoney(Math.max(0, total - paid));
+    if (lab) lab.textContent = resolvePaidStatus(paid, total);
+  };
+  if (ps) { ps.oninput = syncPay; }
+  const setAdvance = (v) => {
+    bookingCtx.advancePaid = String(v);
+    const el = document.getElementById('advancePaid');
+    if (el) el.value = String(v);
+    syncPay();
+  };
+  const fareNow = Number(bookingCtx.trip?.fare) || 0;
+  const totalNow = fareNow * bookingCtx.selected.length;
+  const pn = document.getElementById('payNone');
+  if (pn) pn.onclick = () => setAdvance(0);
+  const ph = document.getElementById('payHalf');
+  if (ph) ph.onclick = () => setAdvance(Math.round(totalNow / 2));
+  const pf = document.getElementById('payFull');
+  if (pf) pf.onclick = () => setAdvance(totalNow);
+  document.querySelectorAll('#bookingMethodGroup [data-paymethod]').forEach((btn) => {
+    btn.onclick = () => {
+      document.querySelectorAll('#bookingMethodGroup [data-paymethod]').forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      bookingCtx.paymentMethod = btn.getAttribute('data-paymethod');
+    };
+  });
+}
+
+function bookingStep2() {
+  const { trip, seatData, mode } = bookingCtx;
+  const map = seatMapHtml(seatData.grid, seatData.booked, bookingCtx.selected, true);
 
   const routeObj = Cache.routes.find((r) => r.id === trip.route_id);
   let pickupStops = [];
@@ -1510,7 +1639,7 @@ function bookingStep2() {
   <div class="booking-grid">
     <div class="panel">
       <h3>Seat Map</h3>
-      ${map}
+      <div id="bookingSeatMapWrap">${map}</div>
       <div class="legend">
         <span><span class="dot" style="background:var(--seat-avail-bg);border:1.5px solid var(--seat-avail);"></span>Available</span>
         <span><span class="dot" style="background:var(--seat-booked-bg);border:1.5px solid var(--seat-booked);"></span>Booked</span>
@@ -1519,7 +1648,7 @@ function bookingStep2() {
     </div>
     <div class="panel">
       <h3>Passenger Details</h3>
-      ${paxHtml}
+      <div id="bookingPaxWrap">${renderPaxCardsHtml()}</div>
       ${pickupStops.length > 0 ? `
         <div class="field" style="margin-top:14px;">
           <label for="bookingPickup">Boarding / Pick-up Stop</label>
@@ -1528,32 +1657,7 @@ function bookingStep2() {
             ${pickupStops.map((s) => `<option value="${esc(s)}" ${bookingCtx.pickupPoint === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
           </select>
         </div>` : ''}
-      ${bookingCtx.selected.length ? `
-        <div class="pay-box">
-          <h4>Payment</h4>
-          <div class="summary-box"><span>Seats</span><b>${bookingCtx.selected.length}</b></div>
-          <div class="summary-box"><span>Fare / seat</span><b>${fmtMoney(fare)}</b></div>
-          <div class="summary-box"><span>Total fare</span><b>${fmtMoney(total)}</b></div>
-          <div class="field" style="margin-top:12px;">
-            <label>Payment Method</label>
-            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;" id="bookingMethodGroup">
-              <button type="button" class="btn btn-secondary ${(!bookingCtx.paymentMethod || bookingCtx.paymentMethod === 'Cash') ? 'active' : ''}" data-paymethod="Cash">💵 Cash</button>
-              <button type="button" class="btn btn-secondary ${bookingCtx.paymentMethod === 'UPI' ? 'active' : ''}" data-paymethod="UPI">📱 UPI</button>
-              <button type="button" class="btn btn-secondary ${bookingCtx.paymentMethod === 'Card' ? 'active' : ''}" data-paymethod="Card">💳 Card</button>
-            </div>
-          </div>
-          <div class="field" style="margin-top:12px;">
-            <label>Advance / amount paid now (₹)</label>
-            <input id="advancePaid" type="number" min="0" max="${total}" step="1" value="${esc(bookingCtx.advancePaid)}" placeholder="0 = unpaid, or enter advance">
-          </div>
-          <div class="summary-box"><span>Balance due</span><b id="balanceDue">${fmtMoney(Math.max(0, total - (Number(bookingCtx.advancePaid) || 0)))}</b></div>
-          <div class="summary-box"><span>Status</span><b id="payStatusLabel">${resolvePaidStatus(bookingCtx.advancePaid, total)}</b></div>
-          <div class="pay-quick">
-            <button type="button" class="btn btn-secondary btn-sm" id="payNone">Unpaid</button>
-            <button type="button" class="btn btn-secondary btn-sm" id="payHalf">Half advance</button>
-            <button type="button" class="btn btn-secondary btn-sm" id="payFull">Full paid</button>
-          </div>
-        </div>` : ''}
+      <div id="bookingPaymentWrap">${renderBookingPayBoxHtml()}</div>
       <div class="actions-row">
         <button class="btn btn-primary" id="confirmBtn">Confirm Booking</button>
         <button class="btn btn-secondary" id="cancelBtn">Cancel</button>
@@ -1564,68 +1668,55 @@ function bookingStep2() {
 
 function attachBookingStep2() {
   document.querySelectorAll('[data-mode]').forEach((btn) => {
-    btn.onclick = () => { bookingCtx.mode = btn.getAttribute('data-mode'); nav('#/booking'); };
-  });
-  document.querySelectorAll('[data-seat]').forEach((el) => el.onclick = () => {
-    const lab = el.getAttribute('data-seat');
-    const i = bookingCtx.selected.indexOf(lab);
-    if (i >= 0) { bookingCtx.selected.splice(i, 1); delete bookingCtx.pax[lab]; toast(`Seat ${lab} removed`); }
-    else { bookingCtx.selected.push(lab); toast(`Seat ${lab} selected`); }
-    nav('#/booking');
-  });
-  document.querySelectorAll('[data-pax]').forEach((el) => {
-    const sync = () => {
-      const [lab, field] = el.getAttribute('data-pax').split('|');
-      bookingCtx.pax[lab] = bookingCtx.pax[lab] || {};
-      bookingCtx.pax[lab][field] = el.value;
+    btn.onclick = () => {
+      bookingCtx.mode = btn.getAttribute('data-mode');
+      document.querySelectorAll('[data-mode]').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const paxWrap = document.getElementById('bookingPaxWrap');
+      if (paxWrap) {
+        paxWrap.innerHTML = renderPaxCardsHtml();
+        attachPaxInputs();
+      }
     };
-    el.onchange = sync; el.oninput = sync;
   });
-  const gc = document.getElementById('groupContact');
-  if (gc) { gc.oninput = () => { bookingCtx.groupContact = gc.value; }; }
-  const aa = document.getElementById('applyAll');
-  if (aa) aa.onchange = () => { bookingCtx.applyAll = aa.checked; nav('#/booking'); };
-  const ln = document.getElementById('leadName');
-  if (ln) ln.oninput = () => { bookingCtx.lead.name = ln.value; };
-  const la = document.getElementById('leadAge');
-  if (la) la.oninput = () => { bookingCtx.lead.age = la.value; };
-  const lg = document.getElementById('leadGender');
-  if (lg) lg.onchange = () => { bookingCtx.lead.gender = lg.value; };
+
+  document.querySelectorAll('[data-seat]').forEach((el) => {
+    el.onclick = () => {
+      const lab = el.getAttribute('data-seat');
+      const i = bookingCtx.selected.indexOf(lab);
+      if (i >= 0) {
+        bookingCtx.selected.splice(i, 1);
+        delete bookingCtx.pax[lab];
+        el.classList.remove('seat-sel');
+        el.classList.add('seat-avail');
+        toast(`Seat ${lab} removed`);
+      } else {
+        bookingCtx.selected.push(lab);
+        el.classList.remove('seat-avail');
+        el.classList.add('seat-sel');
+        toast(`Seat ${lab} selected`);
+      }
+
+      // Smooth in-place updates: ZERO scroll jump, ZERO page re-render!
+      const paxWrap = document.getElementById('bookingPaxWrap');
+      if (paxWrap) {
+        paxWrap.innerHTML = renderPaxCardsHtml();
+        attachPaxInputs();
+      }
+      const payWrap = document.getElementById('bookingPaymentWrap');
+      if (payWrap) {
+        payWrap.innerHTML = renderBookingPayBoxHtml();
+        attachPayInputs();
+      }
+    };
+  });
+
+  attachPaxInputs();
+  attachPayInputs();
+
   const bp = document.getElementById('bookingPickup');
   if (bp) bp.onchange = (e) => { bookingCtx.pickupPoint = e.target.value; };
-  const ps = document.getElementById('advancePaid');
-  const syncPay = () => {
-    const fare = Number(bookingCtx.trip.fare) || 0;
-    const total = fare * bookingCtx.selected.length;
-    const paid = Number(document.getElementById('advancePaid').value) || 0;
-    bookingCtx.advancePaid = document.getElementById('advancePaid').value;
-    const bal = document.getElementById('balanceDue');
-    const lab = document.getElementById('payStatusLabel');
-    if (bal) bal.textContent = fmtMoney(Math.max(0, total - paid));
-    if (lab) lab.textContent = resolvePaidStatus(paid, total);
-  };
-  if (ps) { ps.oninput = syncPay; }
-  const setAdvance = (v) => {
-    bookingCtx.advancePaid = String(v);
-    const el = document.getElementById('advancePaid');
-    if (el) el.value = String(v);
-    syncPay();
-  };
-  const fareNow = Number(bookingCtx.trip.fare) || 0;
-  const totalNow = fareNow * bookingCtx.selected.length;
-  const pn = document.getElementById('payNone');
-  if (pn) pn.onclick = () => setAdvance(0);
-  const ph = document.getElementById('payHalf');
-  if (ph) ph.onclick = () => setAdvance(Math.round(totalNow / 2));
-  const pf = document.getElementById('payFull');
-  if (pf) pf.onclick = () => setAdvance(totalNow);
-  document.querySelectorAll('#bookingMethodGroup [data-paymethod]').forEach((btn) => {
-    btn.onclick = () => {
-      document.querySelectorAll('#bookingMethodGroup [data-paymethod]').forEach((b) => b.classList.remove('active'));
-      btn.classList.add('active');
-      bookingCtx.paymentMethod = btn.getAttribute('data-paymethod');
-    };
-  });
+
   document.getElementById('cancelBtn').onclick = () => {
     bookingCtx = { step: 1, tripId: null, selected: [], pax: {}, mode: 'individual', groupContact: '', applyAll: true, lead: { name: '', age: '', gender: '' }, advancePaid: '', paymentMethod: 'Cash', pickupPoint: '' };
     nav('#/booking');
@@ -1693,12 +1784,33 @@ async function confirmBooking() {
     showConfirmModal(data, seats);
   } catch (err) {
     if (err.status === 409) {
-      const seatData = await api('/trips/' + bookingCtx.tripId + '/seats');
-      bookingCtx.seatData = seatData;
-      bookingCtx.selected = bookingCtx.selected.filter((l) => !seatData.booked[l]);
-      nav('#/booking');
+      try {
+        const latestSeatData = await api('/trips/' + bookingCtx.tripId + '/seats');
+        if (latestSeatData && latestSeatData.booked) {
+          bookingCtx.seatData = latestSeatData;
+          const conflicted = bookingCtx.selected.filter(l => latestSeatData.booked[l]);
+          if (conflicted.length > 0) {
+            conflicted.forEach(l => {
+              const idx = bookingCtx.selected.indexOf(l);
+              if (idx >= 0) bookingCtx.selected.splice(idx, 1);
+              delete bookingCtx.pax[l];
+              const seatEl = document.querySelector(`[data-seat="${esc(l)}"]`);
+              if (seatEl) {
+                seatEl.className = 'seat seat-booked';
+                seatEl.setAttribute('title', 'Booked by another user');
+              }
+            });
+            showErr(`Seat(s) ${conflicted.join(', ')} were just taken by another agent. Your remaining seats and passenger details have been preserved.`);
+            const paxWrap = document.getElementById('bookingPaxWrap');
+            if (paxWrap) { paxWrap.innerHTML = renderPaxCardsHtml(); attachPaxInputs(); }
+            const payWrap = document.getElementById('bookingPaymentWrap');
+            if (payWrap) { payWrap.innerHTML = renderBookingPayBoxHtml(); attachPayInputs(); }
+            return;
+          }
+        }
+      } catch (e2) {}
     }
-    showErr(err.message);
+    showErr(err.message || 'Could not complete booking.');
   } finally {
     const b = document.getElementById('confirmBtn');
     if (b) { b.disabled = false; b.textContent = 'Confirm Booking'; }
@@ -3478,9 +3590,14 @@ function adminRoutesPanel() {
   </div>`;
 }
 
-function adminTripsPanel() {
-  const trips = adminCtx.trips || [];
-  const rows = trips.map((t) => `
+function renderAdminTripsRows(trips) {
+  if (!adminCtx.tripsLoaded) {
+    return `<tr><td colspan="7" class="empty"><span class="spin"></span> Loading trips...</td></tr>`;
+  }
+  if (!trips || !trips.length) {
+    return `<tr><td colspan="7" class="empty">No trips for this date.</td></tr>`;
+  }
+  return trips.map((t) => `
     <tr>
       <td>${esc(t.time)}</td>
       <td>${esc(t.route_name)}</td>
@@ -3496,7 +3613,11 @@ function adminTripsPanel() {
       : ''}
         <button class="btn btn-danger btn-sm" data-del-trip="${t.id}">Delete</button>
       </td>
-    </tr>`).join('') || `<tr><td colspan="7" class="empty">No trips for this date.</td></tr>`;
+    </tr>`).join('');
+}
+
+function adminTripsPanel() {
+  const trips = adminCtx.trips || [];
   return `
   <div class="panel">
     <div class="panel-head">
@@ -3509,7 +3630,7 @@ function adminTripsPanel() {
     </div>
     <div style="overflow-x:auto;"><table>
       <thead><tr><th>Time</th><th>Route</th><th>Bus</th><th>Booked</th><th>Fare</th><th>Status</th><th>Actions</th></tr></thead>
-      <tbody>${rows}</tbody>
+      <tbody id="adminTripsTableBody">${renderAdminTripsRows(trips)}</tbody>
     </table></div>
   </div>`;
 }
@@ -3521,12 +3642,84 @@ async function loadAdminTrips() {
   adminCtx.tripsLoaded = true;
 }
 
+function attachAdminTripsRowActions() {
+  document.querySelectorAll('[data-trip-status]').forEach((btn) => {
+    btn.onclick = async () => {
+      const [id, nextStatus] = btn.getAttribute('data-trip-status').split('|');
+      btn.disabled = true;
+      try {
+        await api('/trips/' + id + '/status', { method: 'PATCH', body: JSON.stringify({ status: nextStatus }) });
+        toast(`Trip marked as ${nextStatus}`);
+        dashboardCtx.loaded = false;
+        await refreshAdminTripsTable();
+      } catch (err) {
+        toast(err.message);
+        btn.disabled = false;
+      }
+    };
+  });
+
+  document.querySelectorAll('[data-cancel-trip]').forEach((btn) => {
+    btn.onclick = async () => {
+      if (!confirm('Cancel this trip? Agents will no longer be able to book seats on it.')) return;
+      btn.disabled = true;
+      try {
+        await api('/trips/' + btn.getAttribute('data-cancel-trip') + '/cancel', { method: 'PATCH' });
+        toast('Trip cancelled');
+        dashboardCtx.loaded = false;
+        await refreshAdminTripsTable();
+      } catch (err) {
+        toast(err.message);
+        btn.disabled = false;
+      }
+    };
+  });
+
+  document.querySelectorAll('[data-del-trip]').forEach((btn) => {
+    btn.onclick = async () => {
+      const id = btn.getAttribute('data-del-trip');
+      if (!confirm('Delete this trip permanently?')) return;
+      btn.disabled = true;
+      try {
+        await api('/trips/' + id, { method: 'DELETE' });
+        toast('Trip deleted');
+        await refreshAdminTripsTable();
+      } catch (err) {
+        if (err.status === 409 && err.data && err.data.needsForce) {
+          if (confirm(err.message + '\n\nForce delete trip and all its bookings?')) {
+            try {
+              await api('/trips/' + id + '?force=1', { method: 'DELETE' });
+              toast('Trip force-deleted');
+              await refreshAdminTripsTable();
+              return;
+            } catch (e2) { toast(e2.message); }
+          }
+        } else {
+          toast(err.message);
+        }
+        btn.disabled = false;
+      }
+    };
+  });
+}
+
+async function refreshAdminTripsTable() {
+  const tbody = document.getElementById('adminTripsTableBody');
+  if (tbody) {
+    tbody.innerHTML = `<tr><td colspan="7" class="empty"><span class="spin"></span> Loading trips...</td></tr>`;
+  }
+  await loadAdminTrips();
+  if (tbody) {
+    tbody.innerHTML = renderAdminTripsRows(adminCtx.trips);
+    attachAdminTripsRowActions();
+  }
+}
+
 async function attachAdminRoutesTrips() {
   document.querySelectorAll('[data-tab]').forEach((btn) => {
     btn.onclick = async () => {
       adminCtx.tab = btn.getAttribute('data-tab');
-      if (adminCtx.tab === 'trips' && !adminCtx.tripsLoaded) await loadAdminTrips();
-      nav('#/admin/routes-trips');
+      nav('#/admin/routes-trips', true, false);
     };
   });
 
@@ -3547,7 +3740,7 @@ async function attachAdminRoutesTrips() {
           await api('/routes/' + id, { method: 'DELETE' });
           toast('Route deleted');
           await loadCaches();
-          nav('#/admin/routes-trips');
+          nav('#/admin/routes-trips', true, false);
         } catch (err) {
           if (err.status === 409 && err.data && err.data.needsForce) {
             if (confirm(err.message + '\n\nForce delete route, trips, and bookings?')) {
@@ -3556,7 +3749,7 @@ async function attachAdminRoutesTrips() {
                 toast('Route force-deleted');
                 await loadCaches();
                 adminCtx.tripsLoaded = false;
-                nav('#/admin/routes-trips');
+                nav('#/admin/routes-trips', true, false);
                 return;
               } catch (e2) { toast(e2.message); }
             }
@@ -3571,83 +3764,25 @@ async function attachAdminRoutesTrips() {
   }
 
   if (!adminCtx.tripsLoaded) {
-    await loadAdminTrips();
-    nav('#/admin/routes-trips');
-    return;
+    refreshAdminTripsTable();
+  } else {
+    attachAdminTripsRowActions();
   }
 
-  document.getElementById('addTripBtn').onclick = () => openTripForm();
-  document.getElementById('reloadTripsBtn').onclick = async () => {
-    await loadAdminTrips();
-    nav('#/admin/routes-trips');
+  const addTripBtn = document.getElementById('addTripBtn');
+  if (addTripBtn) addTripBtn.onclick = () => openTripForm();
+
+  const reloadTripsBtn = document.getElementById('reloadTripsBtn');
+  if (reloadTripsBtn) reloadTripsBtn.onclick = async () => {
+    await refreshAdminTripsTable();
     toast('Trips refreshed');
   };
-  document.getElementById('adminTripDate').onchange = async (e) => {
-    adminCtx.tripDate = e.target.value;
-    await loadAdminTrips();
-    nav('#/admin/routes-trips');
-  };
-  document.querySelectorAll('[data-trip-status]').forEach((btn) => {
-    btn.onclick = async () => {
-      const [id, nextStatus] = btn.getAttribute('data-trip-status').split('|');
-      btn.disabled = true;
-      try {
-        await api('/trips/' + id + '/status', { method: 'PATCH', body: JSON.stringify({ status: nextStatus }) });
-        toast(`Trip marked as ${nextStatus}`);
-        await loadAdminTrips();
-        dashboardCtx.loaded = false;
-        nav('#/admin/routes-trips');
-      } catch (err) {
-        toast(err.message);
-        btn.disabled = false;
-      }
-    };
-  });
 
-  document.querySelectorAll('[data-cancel-trip]').forEach((btn) => {
-    btn.onclick = async () => {
-      if (!confirm('Cancel this trip? Agents will no longer be able to book seats on it.')) return;
-      btn.disabled = true;
-      try {
-        await api('/trips/' + btn.getAttribute('data-cancel-trip') + '/cancel', { method: 'PATCH' });
-        toast('Trip cancelled');
-        await loadAdminTrips();
-        dashboardCtx.loaded = false;
-        nav('#/admin/routes-trips');
-      } catch (err) {
-        toast(err.message);
-        btn.disabled = false;
-      }
-    };
-  });
-  document.querySelectorAll('[data-del-trip]').forEach((btn) => {
-    btn.onclick = async () => {
-      const id = btn.getAttribute('data-del-trip');
-      if (!confirm('Delete this trip permanently?')) return;
-      btn.disabled = true;
-      try {
-        await api('/trips/' + id, { method: 'DELETE' });
-        toast('Trip deleted');
-        await loadAdminTrips();
-        nav('#/admin/routes-trips');
-      } catch (err) {
-        if (err.status === 409 && err.data && err.data.needsForce) {
-          if (confirm(err.message + '\n\nForce delete trip and all its bookings?')) {
-            try {
-              await api('/trips/' + id + '?force=1', { method: 'DELETE' });
-              toast('Trip force-deleted');
-              await loadAdminTrips();
-              nav('#/admin/routes-trips');
-              return;
-            } catch (e2) { toast(e2.message); }
-          }
-        } else {
-          toast(err.message);
-        }
-        btn.disabled = false;
-      }
-    };
-  });
+  const tripDateInput = document.getElementById('adminTripDate');
+  if (tripDateInput) tripDateInput.onchange = async (e) => {
+    adminCtx.tripDate = e.target.value;
+    await refreshAdminTripsTable();
+  };
 }
 
 function openRouteForm(route) {
@@ -3758,7 +3893,7 @@ function openTripForm() {
       adminCtx.tripDate = date;
       adminCtx.tripsLoaded = false;
       await loadAdminTrips();
-      nav('#/admin/routes-trips');
+      nav('#/admin/routes-trips', true, false);
     },
   });
 }
