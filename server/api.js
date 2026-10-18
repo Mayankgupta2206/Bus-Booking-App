@@ -49,6 +49,7 @@ router.post('/auth/login', loginLimiter, (req, res) => {
     return res.status(401).json({ error: 'Invalid username or password.' });
   }
   const token = signToken(user);
+  logAudit('USER_LOGIN', 'USER', user.username, { name: user.name, role: user.role }, user.name, user.role);
   res.json({
     token,
     user: {
@@ -143,6 +144,7 @@ router.delete('/routes/:id', requireAuth, requirePerm('can_manage_routes'), (req
     db.prepare('DELETE FROM routes WHERE id = ?').run(req.params.id);
   });
   tx();
+  logAudit('ROUTE_DELETED', 'ROUTE', route.name, { source: route.source, destination: route.destination, deletedTrips: tripCount }, req.user.name, req.user.role);
   res.json({ ok: true, deletedTrips: tripCount });
 });
 
@@ -308,6 +310,7 @@ router.post('/buses', requireAuth, requirePerm('can_manage_buses'), (req, res) =
     const seatCount = countSeats(grid);
     const info = db.prepare('INSERT INTO buses (name,rows,cols,pattern,layout_json,active) VALUES (?,?,?,?,?,?)')
       .run(name, grid.length, seatCount, pattern || 'custom', serializeLayout(grid), active === false ? 0 : 1);
+    logAudit('BUS_CREATED', 'BUS', name, { seatCount, rows: grid.length, pattern: pattern || 'custom' }, req.user.name, req.user.role);
     res.status(201).json(enrichBus(db.prepare('SELECT * FROM buses WHERE id = ?').get(info.lastInsertRowid)));
   } catch (e) {
     if (String(e).includes('UNIQUE')) return res.status(409).json({ error: 'A bus with this name already exists.' });
@@ -332,6 +335,7 @@ router.patch('/buses/:id', requireAuth, requirePerm('can_manage_buses'), (req, r
     const seatCount = countSeats(grid);
     db.prepare('UPDATE buses SET name=?, rows=?, cols=?, pattern=?, layout_json=?, active=? WHERE id=?')
       .run(name, grid.length, seatCount, pattern || 'custom', serializeLayout(grid), active, req.params.id);
+    logAudit('BUS_UPDATED', 'BUS', name, { seatCount, rows: grid.length, pattern: pattern || 'custom', active }, req.user.name, req.user.role);
     res.json(enrichBus(db.prepare('SELECT * FROM buses WHERE id = ?').get(req.params.id)));
   } catch (e) {
     if (String(e).includes('UNIQUE')) return res.status(409).json({ error: 'A bus with this name already exists.' });
@@ -361,6 +365,7 @@ router.delete('/buses/:id', requireAuth, requirePerm('can_manage_buses'), (req, 
     db.prepare('DELETE FROM buses WHERE id = ?').run(req.params.id);
   });
   tx();
+  logAudit('BUS_DELETED', 'BUS', bus.name, { deletedTrips: tripCount }, req.user.name, req.user.role);
   res.json({ ok: true, deletedTrips: tripCount });
 });
 
@@ -404,6 +409,7 @@ router.post('/trips', requireAuth, requirePerm('can_manage_trips'), (req, res) =
                            JOIN routes r ON r.id = t.route_id
                            JOIN buses b ON b.id = t.bus_id
                            WHERE t.id = ?`).get(info.lastInsertRowid);
+  logAudit('TRIP_SCHEDULED', 'TRIP', String(trip.id), { route: trip.route_name, bus: trip.bus_name, date, time }, req.user.name, req.user.role);
   res.status(201).json(trip);
 });
 
@@ -412,6 +418,7 @@ router.patch('/trips/:id/cancel', requireAuth, requirePerm('can_manage_trips'), 
   if (!trip) return res.status(404).json({ error: 'Trip not found.' });
   if (trip.status === 'Cancelled') return res.json({ ok: true, status: 'Cancelled' });
   db.prepare("UPDATE trips SET status = 'Cancelled' WHERE id = ?").run(req.params.id);
+  logAudit('TRIP_CANCELLED', 'TRIP', String(trip.id), { routeId: trip.route_id, date: trip.date, time: trip.time }, req.user.name, req.user.role);
   res.json({ ok: true, status: 'Cancelled' });
 });
 
@@ -424,6 +431,7 @@ router.patch('/trips/:id/status', requireAuth, requirePerm('can_manage_trips'), 
   const trip = db.prepare('SELECT * FROM trips WHERE id = ?').get(req.params.id);
   if (!trip) return res.status(404).json({ error: 'Trip not found.' });
   db.prepare('UPDATE trips SET status = ? WHERE id = ?').run(status, req.params.id);
+  logAudit('TRIP_STATUS_UPDATED', 'TRIP', String(trip.id), { previousStatus: trip.status, newStatus: status, date: trip.date, time: trip.time }, req.user.name, req.user.role);
   res.json({ ok: true, id: trip.id, status });
 });
 
@@ -445,6 +453,7 @@ router.delete('/trips/:id', requireAuth, requirePerm('can_manage_trips'), (req, 
     db.prepare('DELETE FROM trips WHERE id = ?').run(req.params.id);
   });
   tx();
+  logAudit('TRIP_DELETED', 'TRIP', String(trip.id), { date: trip.date, time: trip.time }, req.user.name, req.user.role);
   res.json({ ok: true });
 });
 
@@ -914,6 +923,14 @@ router.delete('/bookings/:id', requireAuth, (req, res) => {
   });
 
   tx();
+  logAudit('BOOKING_CANCELLED', 'BOOKING', booking.pnr, {
+    seats: seatLabels,
+    route: booking.route_name,
+    bus: booking.bus_name,
+    reason: refundNotes,
+    amountPaid: booking.amount_paid,
+    totalAmount: booking.total_amount
+  }, req.user.name, req.user.role);
   res.json({
     ok: true,
     pnr: booking.pnr,
@@ -962,6 +979,14 @@ router.delete('/bookings/:id/seats/:seatLabel', requireAuth, (req, res) => {
       db.prepare('DELETE FROM bookings WHERE id = ?').run(booking.id);
     });
     tx();
+    logAudit('BOOKING_CANCELLED', 'BOOKING', booking.pnr, {
+      seats: label,
+      route: booking.route_name,
+      bus: booking.bus_name,
+      reason: 'Single seat cancelled - booking closed',
+      amountPaid: booking.amount_paid,
+      totalAmount: booking.total_amount
+    }, req.user.name, req.user.role);
     return res.json({ ok: true, freedSeat: label, bookingDeleted: true, message: `Seat ${label} released and booking closed.` });
   }
 
@@ -978,6 +1003,15 @@ router.delete('/bookings/:id/seats/:seatLabel', requireAuth, (req, res) => {
   });
 
   tx();
+  logAudit('SEAT_CANCELLED', 'BOOKING', booking.pnr, {
+    seat: label,
+    route: booking.route_name,
+    bus: booking.bus_name,
+    reason: 'Seat released',
+    newTotal,
+    newPaid,
+    newStatus
+  }, req.user.name, req.user.role);
   res.json({ ok: true, freedSeat: label, message: `Seat ${label} released.` });
 });
 
@@ -985,6 +1019,7 @@ router.delete('/bookings/:id/seats/:seatLabel', requireAuth, (req, res) => {
 router.post('/admin/backup', requireAuth, requireAdmin, async (req, res) => {
   try {
     const backup = await runBackup();
+    logAudit('DATABASE_BACKUP_CREATED', 'SYSTEM', backup.fileName, { size: backup.size }, req.user.name, req.user.role);
     res.json({ ok: true, backup });
   } catch (err) {
     res.status(500).json({ error: err.message || 'Backup failed.' });

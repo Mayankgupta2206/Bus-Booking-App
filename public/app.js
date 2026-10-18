@@ -2775,7 +2775,15 @@ function formatAuditDetails(raw) {
     if (typeof obj !== 'object' || obj == null) return esc(String(raw));
     const parts = [];
     if (obj.seats) parts.push(`Seats: <b>${esc(Array.isArray(obj.seats) ? obj.seats.join(', ') : obj.seats)}</b>`);
+    if (obj.seat) parts.push(`Seat: <b>${esc(obj.seat)}</b>`);
+    if (obj.route) parts.push(`Route: <b>${esc(obj.route)}</b>`);
+    if (obj.bus) parts.push(`Bus: ${esc(obj.bus)}`);
+    if (obj.date) parts.push(`Date: ${esc(obj.date)}`);
+    if (obj.time) parts.push(`Time: ${esc(obj.time)}`);
+    if (obj.newStatus) parts.push(`Status: <b>${esc(obj.newStatus)}</b>`);
     if (obj.amount != null) parts.push(`Amount: <b>${fmtMoney(obj.amount)}</b>`);
+    if (obj.totalAmount != null) parts.push(`Total: <b>${fmtMoney(obj.totalAmount)}</b>`);
+    if (obj.amountPaid != null) parts.push(`Paid: <b>${fmtMoney(obj.amountPaid)}</b>`);
     if (obj.paymentMethod) parts.push(`Method: ${esc(obj.paymentMethod)}`);
     if (obj.pickupPoint) parts.push(`Pickup: 📍 ${esc(obj.pickupPoint)}`);
     if (obj.pnr) parts.push(`PNR: <b>${esc(obj.pnr)}</b>`);
@@ -2791,9 +2799,8 @@ function formatAuditDetails(raw) {
   }
 }
 
-function auditLogsView() {
-  const logs = auditLogsCtx.logs || [];
-  const q = (auditLogsCtx.filter || '').trim().toLowerCase();
+function renderAuditTableRows(logs, filter) {
+  const q = (filter || '').trim().toLowerCase();
   const filtered = q
     ? logs.filter((l) =>
         String(l.action || '').toLowerCase().includes(q) ||
@@ -2803,13 +2810,11 @@ function auditLogsView() {
       )
     : logs;
 
-  const totalLogs = logs.length;
-  const bookingCount = logs.filter((l) => l.action && l.action.includes('BOOKING_CREATED')).length;
-  const cancelCount = logs.filter((l) => l.action && l.action.includes('CANCEL')).length;
-  const boardCount = logs.filter((l) => l.action && l.action.includes('BOARD')).length;
-  const payCount = logs.filter((l) => l.action && (l.action.includes('PAY') || l.action.includes('BALANCE'))).length;
+  if (filtered.length === 0) {
+    return `<tr><td colspan="5" class="empty">No audit logs matching "${esc(filter || '')}"</td></tr>`;
+  }
 
-  const rows = filtered.map((l) => `
+  return filtered.map((l) => `
     <tr>
       <td style="white-space:nowrap;font-size:12px;color:var(--ink-soft);">${new Date(l.created_at).toLocaleString('en-IN')}</td>
       <td><span class="${auditBadgeClass(l.action)}">${esc(l.action)}</span></td>
@@ -2818,6 +2823,37 @@ function auditLogsView() {
       <td><b>${esc(l.performed_by)}</b> <span class="muted" style="font-size:11px;">(${esc(l.role)})</span></td>
     </tr>
   `).join('');
+}
+
+function renderAuditKpiCards(logs) {
+  const totalLogs = logs.length;
+  const bookingCount = logs.filter((l) => l.action && l.action.includes('BOOKING_CREATED')).length;
+  const cancelCount = logs.filter((l) => l.action && l.action.includes('CANCEL')).length;
+  const boardCount = logs.filter((l) => l.action && l.action.includes('BOARD')).length;
+  const payCount = logs.filter((l) => l.action && (l.action.includes('PAY') || l.action.includes('BALANCE'))).length;
+
+  return `
+    <div class="kpi-card"><div class="kpi-num">${totalLogs}</div><div class="kpi-lbl">Total Events Logged</div></div>
+    <div class="kpi-card"><div class="kpi-num">${bookingCount}</div><div class="kpi-lbl">Bookings Created</div></div>
+    <div class="kpi-card"><div class="kpi-num">${cancelCount}</div><div class="kpi-lbl">Cancellations</div></div>
+    <div class="kpi-card"><div class="kpi-num">${boardCount}</div><div class="kpi-lbl">Boarding Events</div></div>
+    <div class="kpi-card"><div class="kpi-num">${payCount}</div><div class="kpi-lbl">Balance Collections</div></div>
+  `;
+}
+
+function updateAuditTableInPlace() {
+  const tbody = document.getElementById('auditLogsTbody');
+  if (tbody) {
+    tbody.innerHTML = renderAuditTableRows(auditLogsCtx.logs || [], auditLogsCtx.filter);
+  }
+  const kpis = document.getElementById('auditLogsKpiWrap');
+  if (kpis) {
+    kpis.innerHTML = renderAuditKpiCards(auditLogsCtx.logs || []);
+  }
+}
+
+function auditLogsView() {
+  const logs = auditLogsCtx.logs || [];
 
   return `
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
@@ -2827,12 +2863,8 @@ function auditLogsView() {
     </div>
   </div>
 
-  <div class="kpi-grid" style="margin-bottom:16px;">
-    <div class="kpi-card"><div class="kpi-num">${totalLogs}</div><div class="kpi-lbl">Total Events Logged</div></div>
-    <div class="kpi-card"><div class="kpi-num">${bookingCount}</div><div class="kpi-lbl">Bookings Created</div></div>
-    <div class="kpi-card"><div class="kpi-num">${cancelCount}</div><div class="kpi-lbl">Cancellations</div></div>
-    <div class="kpi-card"><div class="kpi-num">${boardCount}</div><div class="kpi-lbl">Boarding Events</div></div>
-    <div class="kpi-card"><div class="kpi-num">${payCount}</div><div class="kpi-lbl">Balance Collections</div></div>
+  <div class="kpi-grid" id="auditLogsKpiWrap" style="margin-bottom:16px;">
+    ${renderAuditKpiCards(logs)}
   </div>
 
   <div class="panel">
@@ -2840,10 +2872,9 @@ function auditLogsView() {
       <div class="field" style="flex:1;">
         <input id="auditSearchInput" placeholder="Filter by action, user, PNR, or keyword..." value="${esc(auditLogsCtx.filter || '')}">
       </div>
-      ${auditLogsCtx.filter ? '<button class="btn btn-secondary" id="clearAuditFilterBtn">Clear</button>' : ''}
+      <button class="btn btn-secondary ${auditLogsCtx.filter ? '' : 'hidden'}" id="clearAuditFilterBtn">Clear</button>
     </div>
 
-    ${filtered.length === 0 ? `<div class="empty">No audit logs matching "${esc(auditLogsCtx.filter)}"</div>` : `
     <div class="table-wrap">
       <table>
         <thead>
@@ -2855,9 +2886,11 @@ function auditLogsView() {
             <th>Performed By</th>
           </tr>
         </thead>
-        <tbody>${rows}</tbody>
+        <tbody id="auditLogsTbody">
+          ${renderAuditTableRows(logs, auditLogsCtx.filter)}
+        </tbody>
       </table>
-    </div>`}
+    </div>
   </div>
   `;
 }
@@ -2865,35 +2898,28 @@ function auditLogsView() {
 async function attachAuditLogs() {
   if (!auditLogsCtx.loaded && !auditLogsCtx.loading) {
     await loadAuditLogs();
-    const main = document.getElementById('main');
-    if (main) {
-      main.innerHTML = auditLogsView();
-      attachAuditLogs();
-    }
-    return;
+    updateAuditTableInPlace();
   }
 
   const sInput = document.getElementById('auditSearchInput');
+  const clearBtn = document.getElementById('clearAuditFilterBtn');
   if (sInput) {
     sInput.oninput = (e) => {
       auditLogsCtx.filter = e.target.value;
-      const main = document.getElementById('main');
-      if (main) {
-        main.innerHTML = auditLogsView();
-        attachAuditLogs();
+      if (clearBtn) {
+        if (auditLogsCtx.filter) clearBtn.classList.remove('hidden');
+        else clearBtn.classList.add('hidden');
       }
+      updateAuditTableInPlace();
     };
   }
 
-  const clearBtn = document.getElementById('clearAuditFilterBtn');
   if (clearBtn) {
     clearBtn.onclick = () => {
       auditLogsCtx.filter = '';
-      const main = document.getElementById('main');
-      if (main) {
-        main.innerHTML = auditLogsView();
-        attachAuditLogs();
-      }
+      if (sInput) sInput.value = '';
+      clearBtn.classList.add('hidden');
+      updateAuditTableInPlace();
     };
   }
 
@@ -2901,13 +2927,12 @@ async function attachAuditLogs() {
   if (refBtn) {
     refBtn.onclick = async () => {
       refBtn.disabled = true;
-      refBtn.innerHTML = '<span class="spin"></span>';
+      refBtn.innerHTML = '<span class="spin"></span> Loading...';
       await loadAuditLogs();
-      const main = document.getElementById('main');
-      if (main) {
-        main.innerHTML = auditLogsView();
-        attachAuditLogs();
-      }
+      updateAuditTableInPlace();
+      refBtn.disabled = false;
+      refBtn.innerHTML = '🔄 Refresh';
+      toast('Audit logs refreshed');
     };
   }
 }

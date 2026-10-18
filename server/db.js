@@ -233,6 +233,62 @@ function logAudit(action, entityType, entityId, details, performedBy, role) {
   }
 }
 
+// Backfill historical audit logs for bookings & cancellations if audit_logs is empty
+(function backfillHistoricalAuditLogs() {
+  try {
+    const existing = db.prepare('SELECT COUNT(*) as c FROM audit_logs').get()?.c || 0;
+    if (existing === 0) {
+      const insertAudit = db.prepare('INSERT INTO audit_logs (action, entity_type, entity_id, details, performed_by, role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+      
+      // 1. Backfill cancelled bookings
+      const cancelled = db.prepare('SELECT * FROM cancelled_bookings').all();
+      for (const c of cancelled) {
+        insertAudit.run(
+          'BOOKING_CANCELLED',
+          'BOOKING',
+          c.pnr,
+          JSON.stringify({
+            seats: c.seats_list,
+            route: c.route_name,
+            bus: c.bus_name,
+            reason: c.refund_notes,
+            amountPaid: c.amount_paid,
+            totalAmount: c.total_amount
+          }),
+          c.cancelled_by || 'Staff',
+          'Admin',
+          c.cancelled_at || new Date().toISOString()
+        );
+      }
+
+      // 2. Backfill active bookings
+      const bookings = db.prepare('SELECT * FROM bookings').all();
+      for (const b of bookings) {
+        const seats = db.prepare('SELECT seat_label FROM booking_seats WHERE booking_id = ?').all(b.id).map(s => s.seat_label);
+        insertAudit.run(
+          'BOOKING_CREATED',
+          'BOOKING',
+          b.pnr,
+          JSON.stringify({
+            seats,
+            totalAmount: b.total_amount,
+            amountPaid: b.amount_paid,
+            paidStatus: b.paid_status,
+            paymentMethod: b.payment_method
+          }),
+          b.booked_by || 'Staff',
+          b.booked_by_role || 'Agent',
+          b.created_at || new Date().toISOString()
+        );
+      }
+      db.syncCloud();
+    }
+  } catch (err) {
+    console.warn('Audit logs backfill notice:', err.message);
+  }
+})();
+
+
 // Allow In-Transit on trip status check
 (function migrateTripStatusCheck() {
   const sample = db.prepare('SELECT sql FROM sqlite_master WHERE type=? AND name=?').get('table', 'trips');
