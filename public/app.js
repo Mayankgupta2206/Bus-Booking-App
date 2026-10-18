@@ -3703,12 +3703,39 @@ function openRouteForm(route) {
 }
 
 function openTripForm() {
-  const routeOpts = Cache.routes.filter((r) => r.active).map((r) => `<option value="${r.id}">${esc(r.name)} (${fmtMoney(r.fare)})</option>`).join('');
-  const busOpts = Cache.buses.filter((b) => b.active).map((b) => `<option value="${b.id}">${esc(b.name)} (${b.seatCount || b.cols} seats)</option>`).join('');
-  if (!routeOpts || !busOpts) {
-    toast('Add at least one active route and bus first');
+  const activeRoutes = Cache.routes.filter((r) => r.active);
+  const activeBuses = Cache.buses.filter((b) => b.active);
+
+  if (!activeRoutes.length && !activeBuses.length) {
+    toast('Please create at least one Route and one Bus first');
     return;
   }
+  if (!activeRoutes.length) {
+    toast('Please create at least one active Route first in the Routes tab');
+    return;
+  }
+  if (!activeBuses.length) {
+    openFormModal({
+      title: '🚌 Bus Required to Schedule Trip',
+      submitLabel: '🚌 Go to Bus Manager',
+      bodyHtml: `
+        <div style="padding:10px 0;font-size:13.5px;line-height:1.6;color:var(--ink);">
+          <p>Aapne <b>Route</b> toh bana liya hai, lekin system me abhi tak koi <b>Bus</b> add nahi hai!</p>
+          <p style="margin-top:8px;color:var(--ink-soft);">Trip schedule karne ke liye ek Bus hona zaroori hai taaki uski seats par booking ho sake.</p>
+          <div style="margin-top:14px;background:#F8FAFC;border:1px solid #E2E8F0;padding:12px;border-radius:6px;font-size:12.5px;">
+            <b>Next Step:</b> Neeche "Go to Bus Manager" par click karke <b>+ Add Bus</b> karein.
+          </div>
+        </div>
+      `,
+      onSubmit: async () => {
+        nav('#/admin/buses');
+      }
+    });
+    return;
+  }
+
+  const routeOpts = activeRoutes.map((r) => `<option value="${r.id}">${esc(r.name)} (${fmtMoney(r.fare)})</option>`).join('');
+  const busOpts = activeBuses.map((b) => `<option value="${b.id}">${esc(b.name)} (${b.seatCount || b.cols} seats)</option>`).join('');
   openFormModal({
     title: 'Schedule Trip',
     submitLabel: 'Create Trip',
