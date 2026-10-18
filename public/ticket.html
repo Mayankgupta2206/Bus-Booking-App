@@ -106,6 +106,7 @@ body {
 .stamp-paid { color: var(--ok); border-color: var(--ok); background: #DCFCE7; }
 .stamp-partial { color: var(--saffron); border-color: var(--saffron); background: #FEF3C7; }
 .stamp-unpaid { color: var(--err); border-color: var(--err); background: #FEE2E2; }
+.stamp-expired { color: #64748B; border-color: #64748B; background: #F1F5F9; }
 
 .ticket-meta {
   display: grid;
@@ -410,20 +411,50 @@ function renderBoardingPass(container, b) {
   const seats = b.seats || [];
   const seatListStr = seats.map(s => s.seat_label).join(', ');
   const bal = Math.max(0, Number(b.total_amount || 0) - Number(b.amount_paid || 0));
-  const stampClass = b.paid_status === 'Paid' ? 'stamp-paid' : b.paid_status === 'Partial' ? 'stamp-partial' : 'stamp-unpaid';
+  const isExpired = Boolean(b.expired);
+  const stampText = isExpired ? 'EXPIRED' : b.paid_status;
+  const stampClass = isExpired ? 'stamp-expired' : (b.paid_status === 'Paid' ? 'stamp-paid' : b.paid_status === 'Partial' ? 'stamp-partial' : 'stamp-unpaid');
 
   const rows = seats.map(s => `
     <tr>
       <td><b>${esc(s.seat_label)}</b></td>
       <td>${esc(s.passenger_name || 'Passenger')}</td>
       <td>${esc(s.age || '—')} / ${esc(s.gender || '—')}</td>
-      <td>${s.boarded ? '<span style="color:var(--ok);font-weight:600;">✓ Boarded</span>' : '<span style="color:var(--ink-soft);">Confirmed</span>'}</td>
+      <td>${isExpired ? '<span style="color:#64748B;font-weight:600;">Trip Completed</span>' : (s.boarded ? '<span style="color:var(--ok);font-weight:600;">✓ Boarded</span>' : '<span style="color:var(--ink-soft);">Confirmed</span>')}</td>
     </tr>
   `).join('');
 
+  const expiredBannerHtml = isExpired ? `
+    <div style="background:#FEF2F2;border:1px solid #FCA5A5;color:#991B1B;padding:12px 14px;border-radius:8px;margin-bottom:14px;display:flex;align-items:center;gap:10px;">
+      <span style="font-size:24px;">🛑</span>
+      <div>
+        <b style="font-size:14px;">Boarding Pass Expired (Journey Completed)</b>
+        <div style="font-size:12px;color:#7F1D1D;margin-top:2px;">
+          ${esc(b.expiry_reason || `Aapki journey ${fmtDate(b.trip_date)} ko complete ho chuki hai. Yeh boarding pass ab active nahi hai.`)}
+        </div>
+      </div>
+    </div>
+  ` : '';
+
+  const qrBlockHtml = isExpired ? `
+    <div class="ticket-qr-wrap" style="background:#F8FAFC;border:1px dashed var(--line);border-radius:6px;padding:16px;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:4px;">
+      <div style="color:var(--err);font-weight:700;font-size:14px;">🔒 QR Code Verification Closed</div>
+      <div style="font-size:12px;color:var(--ink-soft);">Journey completed on ${fmtDate(b.trip_date)}. This pass can no longer be used for boarding.</div>
+    </div>
+  ` : `
+    <div class="ticket-qr-wrap">
+      <div id="ticketQr" class="ticket-qr-box"></div>
+      <div style="font-size:11.5px;color:var(--ink-soft);text-align:right;">
+        <b>Show this QR code at boarding</b><br>
+        Conductor will scan to verify ticket<br>
+        <b style="color:var(--ink);font-family:'IBM Plex Mono',monospace;">PNR: ${esc(b.pnr)}</b>
+      </div>
+    </div>
+  `;
+
   container.innerHTML = `
     <div class="ticket-wrap">
-      <div class="ticket-stamp ${stampClass}">${esc(b.paid_status)}</div>
+      <div class="ticket-stamp ${stampClass}">${esc(stampText)}</div>
       
       <div class="ticket-head">
         <div class="ticket-badge">SEVA BUS SERVICE</div>
@@ -431,13 +462,15 @@ function renderBoardingPass(container, b) {
         <div class="ticket-pnr-line">PNR: <b>${esc(b.pnr)}</b></div>
       </div>
 
+      ${expiredBannerHtml}
+
       <div class="ticket-meta">
         <div><b>Route:</b> ${esc(b.route_name || (b.source + ' ➔ ' + b.destination))}</div>
         <div><b>Bus:</b> ${esc(b.bus_name || 'Seva Express')}</div>
         <div><b>Date:</b> ${fmtDate(b.trip_date)}</div>
         <div><b>Departure:</b> ${esc(b.trip_time)}</div>
         <div><b>Seats (${seats.length}):</b> <span style="font-family:'IBM Plex Mono',monospace;font-weight:600;color:var(--maroon);">${esc(seatListStr)}</span></div>
-        <div><b>Status:</b> <b>${esc(b.paid_status)}</b></div>
+        <div><b>Status:</b> <b>${esc(stampText)}</b></div>
         ${b.pickup_point ? `<div style="grid-column:span 2;"><b>Pickup Stop:</b> 📍 ${esc(b.pickup_point)}</div>` : ''}
       </div>
 
@@ -453,14 +486,7 @@ function renderBoardingPass(container, b) {
         <span>Balance Due: <b style="color:${bal > 0 ? 'var(--err)' : 'var(--ok)'};">${fmtMoney(bal)}</b></span>
       </div>
 
-      <div class="ticket-qr-wrap">
-        <div id="ticketQr" class="ticket-qr-box"></div>
-        <div style="font-size:11.5px;color:var(--ink-soft);text-align:right;">
-          <b>Show this QR code at boarding</b><br>
-          Conductor will scan to verify ticket<br>
-          <b style="color:var(--ink);font-family:'IBM Plex Mono',monospace;">PNR: ${esc(b.pnr)}</b>
-        </div>
-      </div>
+      ${qrBlockHtml}
     </div>
 
     <div class="actions-bar no-print">
@@ -470,7 +496,7 @@ function renderBoardingPass(container, b) {
     </div>
   `;
 
-  if (window.QRCode && document.getElementById('ticketQr')) {
+  if (!isExpired && window.QRCode && document.getElementById('ticketQr')) {
     try {
       new QRCode(document.getElementById('ticketQr'), {
         text: `SEVA-BUS|PNR:${b.pnr}|SEATS:${seatListStr}|FARE:${b.total_amount}|STATUS:${b.paid_status}`,

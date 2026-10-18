@@ -220,6 +220,37 @@ npm run reset:all
 
 ---
 
+## 📦 Auto-Drive Archive & Google Drive Sync
+
+To prevent the cloud database from ever filling up and keep the web portal super-fast, the **Auto-Drive Archive** system runs daily:
+
+1. **Next-Day Pass Expiry (Option 1):**
+   - When a trip date passes (or status is `Completed`), passenger boarding pass links automatically expire.
+   - The QR code verification is closed to prevent any ticket misuse.
+   - Passengers see a polite notice: *"Boarding Pass Expired (Journey Completed on [Date])"*.
+
+2. **Automated Labeled ZIP Package Generation:**
+   - Every completed trip is packaged into a labeled ZIP: `SevaBus_[DATE]_[ROUTE]_[BUS]_Trip[ID].zip`.
+   - **`Passenger_Manifest.csv`**: Full passenger manifest with names, seats, contacts, boarded status, and cash/UPI payments.
+   - **`Trip_Financial_Summary.txt`**: Trip collections, total gross revenue, balance due, and staff booking breakdowns.
+   - **`Trip_Full_Backup.json`**: Technical database backup for 100% full restoration if ever needed.
+
+3. **Google Drive Cloud Upload:**
+   - Automatically uploads the ZIP file to your Google Drive folder.
+   - With 15 GB of free Google Drive space, you can archive **10+ years of daily trips** for free!
+
+4. **Zero-Data-Loss Safety Lock & Web Database Purge:**
+   - **Rule:** Old bookings are ONLY deleted from the live web database after the archive is safely verified!
+   - Live database stays under 5–10 MB forever, remaining 100% within free-tier cloud limits.
+
+5. **Admin Controls (`#/admin/settings`):**
+   - **Real-Time Status:** Shows pending past trips and total archived trips.
+   - **1-Click Manual Execution:** Tap **"🚀 Run Auto-Drive Archive Now"** to archive past trips instantly.
+   - **Download Archives:** 1-click **"⬇ ZIP"** download directly from the browser for any past trip.
+   - **Google Drive Setup:** Enter your Google Drive Folder ID and paste your Service Account JSON.
+
+---
+
 ## 📄 License & Credits
 
 Developed with ❤️ for Seva Bus operations. Built for performance, security, and reliability.

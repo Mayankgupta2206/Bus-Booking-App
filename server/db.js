@@ -35,7 +35,11 @@ if (isTurso) {
   db.pragma('journal_mode = WAL');
 }
 
-db.pragma('foreign_keys = ON');
+try {
+  db.pragma('foreign_keys = ON');
+} catch (e) {
+  /* Libsql pragma notice */
+}
 
 db.syncCloud = () => {
   if (isTurso && typeof db.sync === 'function') {
@@ -139,6 +143,24 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS trip_archives (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  trip_id INTEGER,
+  trip_date TEXT NOT NULL,
+  route_name TEXT,
+  bus_name TEXT,
+  archive_filename TEXT NOT NULL,
+  drive_file_id TEXT,
+  drive_web_link TEXT,
+  local_path TEXT,
+  archive_data TEXT,
+  total_bookings INTEGER DEFAULT 0,
+  total_seats INTEGER DEFAULT 0,
+  total_revenue REAL DEFAULT 0,
+  archived_at TEXT NOT NULL DEFAULT (datetime('now')),
+  status TEXT NOT NULL DEFAULT 'Archived'
 );
 `);
 

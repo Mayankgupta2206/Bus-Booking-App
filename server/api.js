@@ -6,6 +6,9 @@ const rateLimit = require('express-rate-limit');
 const db = require('./db');
 const { signToken, requireAuth, requireAdmin, requirePerm, requireAgentOrAdmin, requireAdminOrSupervisor } = require('./auth');
 const { runBackup, BACKUP_DIR } = require('./backup');
+const {
+  isTripExpired, runAutoDriveArchive, buildTripArchive, getGoogleDriveClient, getTodayDateIST, ARCHIVES_DIR
+} = require('./archive');
 
 const {
   getBusLayout, countSeats, serializeLayout, defaultLayout, resolvePaidStatus, logAudit,
@@ -660,13 +663,19 @@ router.get(['/public/pass', '/public/pass/:pnr'], (req, res) => {
   }
 
   if (directBooking) {
+    const expired = isTripExpired(directBooking.trip_date, directBooking.trip_status);
     const seats = db.prepare(`
       SELECT id, seat_label, passenger_name, age, gender, contact, boarded
       FROM booking_seats
       WHERE booking_id = ?
       ORDER BY seat_label ASC
     `).all(directBooking.id);
-    return res.json({ ...directBooking, seats });
+    return res.json({
+      ...directBooking,
+      seats,
+      expired,
+      expiry_reason: expired ? `Aapki journey ${directBooking.trip_date} ko complete ho chuki hai. Yeh boarding pass ab active nahi hai.` : null
+    });
   }
 
   // 2. Search by mobile number or partial PNR
@@ -692,13 +701,19 @@ router.get(['/public/pass', '/public/pass/:pnr'], (req, res) => {
 
     if (matches.length === 1) {
       const b = matches[0];
+      const expired = isTripExpired(b.trip_date, b.trip_status);
       const seats = db.prepare(`
         SELECT id, seat_label, passenger_name, age, gender, contact, boarded
         FROM booking_seats
         WHERE booking_id = ?
         ORDER BY seat_label ASC
       `).all(b.id);
-      return res.json({ ...b, seats });
+      return res.json({
+        ...b,
+        seats,
+        expired,
+        expiry_reason: expired ? `Aapki journey ${b.trip_date} ko complete ho chuki hai. Yeh boarding pass ab active nahi hai.` : null
+      });
     }
 
     if (matches.length > 1) {
@@ -710,6 +725,7 @@ router.get(['/public/pass', '/public/pass/:pnr'], (req, res) => {
           WHERE booking_id = ?
           ORDER BY seat_label ASC
         `).all(b.id),
+        expired: isTripExpired(b.trip_date, b.trip_status)
       }));
       return res.json({
         multiple: true,
@@ -718,6 +734,22 @@ router.get(['/public/pass', '/public/pass/:pnr'], (req, res) => {
         bookings: bookingsWithSeats,
       });
     }
+  }
+
+  // 3. Fallback: Check if trip was previously archived & purged
+  const archivedRow = db.prepare(`
+    SELECT * FROM trip_archives
+    WHERE archive_data LIKE ?
+    ORDER BY id DESC LIMIT 1
+  `).get(`%${upper}%`);
+
+  if (archivedRow) {
+    return res.status(410).json({
+      expired: true,
+      error: `Trip #${archivedRow.trip_id} (${archivedRow.route_name}) on ${archivedRow.trip_date} was completed and safely archived. Boarding pass is no longer active.`,
+      trip_date: archivedRow.trip_date,
+      route_name: archivedRow.route_name,
+    });
   }
 
   return res.status(404).json({
@@ -1108,6 +1140,107 @@ router.post('/settings', requireAuth, requirePerm('can_manage_settings'), (req, 
       company_name: getSetting('company_name', 'Seva Bus Service'),
       support_phone: getSetting('support_phone', '')
     }
+  });
+});
+
+/* ---------- Auto-Drive Archive & Google Drive Sync Endpoints ---------- */
+router.get('/archive/status', requireAuth, (req, res) => {
+  const driveClient = getGoogleDriveClient();
+  const today = getTodayDateIST();
+
+  const pending = db.prepare(`
+    SELECT COUNT(*) AS c FROM trips t
+    WHERE (t.date < ? OR t.status = 'Completed')
+      AND t.id NOT IN (
+        SELECT trip_id FROM trip_archives WHERE status IN ('Archived', 'Purged & Archived')
+      )
+  `).get(today);
+
+  const totalArchived = db.prepare('SELECT COUNT(*) AS c FROM trip_archives').get()?.c || 0;
+  const folderId = getSetting('google_drive_folder_id', '');
+
+  res.json({
+    today,
+    driveConfigured: Boolean(driveClient),
+    driveFolderId: folderId,
+    clientEmail: driveClient ? driveClient.clientEmail : (getSetting('google_service_account_email', '') || null),
+    pendingTripsCount: pending?.c || 0,
+    totalArchivedCount: totalArchived,
+  });
+});
+
+router.get('/archive/history', requireAuth, (req, res) => {
+  const limit = Math.min(100, Math.max(10, Number(req.query.limit) || 50));
+  const archives = db.prepare(`
+    SELECT id, trip_id, trip_date, route_name, bus_name, archive_filename,
+           drive_file_id, drive_web_link, total_bookings, total_seats, total_revenue,
+           archived_at, status
+    FROM trip_archives
+    ORDER BY id DESC
+    LIMIT ?
+  `).all(limit);
+  res.json(archives);
+});
+
+router.post('/archive/run', async (req, res) => {
+  const cronSecret = req.headers['x-cron-secret'] || req.query.cron_secret;
+  const configuredSecret = process.env.CRON_SECRET || 'seva-bus-cron-secret';
+  const isCronAuthed = cronSecret && cronSecret === configuredSecret;
+
+  if (!isCronAuthed) {
+    // Standard auth check
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'Authentication required' });
+  }
+
+  try {
+    const results = await runAutoDriveArchive({ requireDrive: false });
+    res.json({ success: true, ...results });
+  } catch (err) {
+    res.status(500).json({ error: 'Archive execution failed: ' + err.message });
+  }
+});
+
+router.get('/archive/download/:id', requireAuth, (req, res) => {
+  const archive = db.prepare('SELECT * FROM trip_archives WHERE id = ?').get(req.params.id);
+  if (!archive) return res.status(404).json({ error: 'Archive record not found' });
+
+  // 1. Check local file on disk
+  if (archive.local_path && fs.existsSync(archive.local_path)) {
+    return res.download(archive.local_path, archive.archive_filename);
+  }
+
+  const defaultPath = path.join(ARCHIVES_DIR, archive.archive_filename);
+  if (fs.existsSync(defaultPath)) {
+    return res.download(defaultPath, archive.archive_filename);
+  }
+
+  // 2. If stored as JSON backup in DB
+  if (archive.archive_data) {
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="${archive.archive_filename.replace('.zip', '.json')}"`);
+    return res.send(archive.archive_data);
+  }
+
+  res.status(404).json({ error: 'Archive file not found on disk. Please open via Google Drive link.' });
+});
+
+router.post('/archive/config', requireAuth, requirePerm('can_manage_settings'), (req, res) => {
+  const { google_drive_folder_id, google_service_account_json, google_service_account_email, google_private_key } = req.body || {};
+
+  if (google_drive_folder_id !== undefined) setSetting('google_drive_folder_id', String(google_drive_folder_id).trim());
+  if (google_service_account_json !== undefined) setSetting('google_service_account_json', String(google_service_account_json).trim());
+  if (google_service_account_email !== undefined) setSetting('google_service_account_email', String(google_service_account_email).trim());
+  if (google_private_key !== undefined) setSetting('google_private_key', String(google_private_key).trim());
+
+  logAudit('ARCHIVE_CONFIG_UPDATED', 'SYSTEM', 'GOOGLE_DRIVE', { google_drive_folder_id }, req.user.name, req.user.role);
+
+  const driveClient = getGoogleDriveClient();
+  res.json({
+    ok: true,
+    driveConfigured: Boolean(driveClient),
+    driveFolderId: getSetting('google_drive_folder_id', ''),
+    clientEmail: driveClient ? driveClient.clientEmail : null,
   });
 });
 

@@ -13,5 +13,11 @@
       "source": "/pass",
       "destination": "/ticket.html"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/archive/run",
+      "schedule": "30 20 * * *"
+    }
   ]
 }

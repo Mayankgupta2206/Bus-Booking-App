@@ -676,25 +676,55 @@ async function renderPublicPass() {
     }
 
     const b = data;
+    const isExpired = Boolean(b.expired);
+    const stampText = isExpired ? 'EXPIRED' : b.paid_status;
+    const stampClass = isExpired ? 'stamp-expired' : (b.paid_status === 'Paid' ? 'stamp-paid' : b.paid_status === 'Partial' ? 'stamp-partial' : 'stamp-unpaid');
     const seats = b.seats || [];
     const seatListStr = seats.map((s) => s.seat_label).join(', ');
     const bal = Math.max(0, Number(b.total_amount || 0) - Number(b.amount_paid || 0));
-    const stampClass = b.paid_status === 'Paid' ? 'stamp-paid' : b.paid_status === 'Partial' ? 'stamp-partial' : 'stamp-unpaid';
 
     const rows = seats.map((s) => `
       <tr>
         <td><b>${esc(s.seat_label)}</b></td>
         <td>${esc(s.passenger_name || 'Passenger')}</td>
         <td>${esc(s.age || '—')} / ${esc(s.gender || '—')}</td>
-        <td>${s.boarded ? '<span style="color:var(--ok);font-weight:600;">✓ Boarded</span>' : '<span style="color:var(--ink-soft);">Confirmed</span>'}</td>
+        <td>${isExpired ? '<span style="color:#64748B;font-weight:600;">Trip Completed</span>' : (s.boarded ? '<span style="color:var(--ok);font-weight:600;">✓ Boarded</span>' : '<span style="color:var(--ink-soft);">Confirmed</span>')}</td>
       </tr>
     `).join('');
+
+    const expiredBannerHtml = isExpired ? `
+      <div style="background:#FEF2F2;border:1px solid #FCA5A5;color:#991B1B;padding:12px 14px;border-radius:8px;margin-bottom:14px;display:flex;align-items:center;gap:10px;">
+        <span style="font-size:24px;">🛑</span>
+        <div>
+          <b style="font-size:14px;">Boarding Pass Expired (Journey Completed)</b>
+          <div style="font-size:12px;color:#7F1D1D;margin-top:2px;">
+            ${esc(b.expiry_reason || `Aapki journey ${fmtDate(b.trip_date)} ko complete ho chuki hai. Yeh boarding pass ab active nahi hai.`)}
+          </div>
+        </div>
+      </div>
+    ` : '';
+
+    const qrBlockHtml = isExpired ? `
+      <div class="ticket-qr-wrap" style="background:#F8FAFC;border:1px dashed var(--line);border-radius:6px;padding:16px;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:4px;margin-top:16px;">
+        <div style="color:var(--err);font-weight:700;font-size:14px;">🔒 QR Code Verification Closed</div>
+        <div style="font-size:12px;color:var(--ink-soft);">Journey completed on ${fmtDate(b.trip_date)}. This pass can no longer be used for boarding.</div>
+      </div>
+    ` : `
+      <div class="ticket-qr-wrap" style="margin-top:16px;">
+        <div id="publicTicketQrArea" class="ticket-qr-box"></div>
+        <div style="font-size:11.5px;color:var(--ink-soft);text-align:right;">
+          <b>Show this QR code at boarding</b><br>
+          Conductor will scan to verify ticket<br>
+          <b style="color:var(--ink);font-family:'IBM Plex Mono',monospace;">PNR: ${esc(b.pnr)}</b>
+        </div>
+      </div>
+    `;
 
     app.innerHTML = `
       <div style="min-height:100vh;background:#F8F6F0;padding:24px 16px;box-sizing:border-box;">
         <div style="max-width:540px;margin:0 auto;">
           <div class="ticket-wrap" id="publicPrintableTicket" style="background:#fff;border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,0.06);position:relative;">
-            <div class="ticket-stamp ${stampClass}">${esc(b.paid_status)}</div>
+            <div class="ticket-stamp ${stampClass}">${esc(stampText)}</div>
             <div class="ticket-head">
               <div class="ticket-badge">SEVA BUS SERVICE</div>
               <h2 style="margin:4px 0 2px;font-size:22px;letter-spacing:0.02em;">PASSENGER BOARDING PASS</h2>
@@ -703,13 +733,15 @@ async function renderPublicPass() {
               </div>
             </div>
 
+            ${expiredBannerHtml}
+
             <div class="ticket-meta">
               <div><b>Route:</b> ${esc(b.route_name || `${b.source} ➔ ${b.destination}`)}</div>
               <div><b>Bus:</b> ${esc(b.bus_name || 'Seva Express')}</div>
               <div><b>Date:</b> ${fmtDate(b.trip_date)}</div>
               <div><b>Departure:</b> ${esc(b.trip_time)}</div>
               <div><b>Seats (${seats.length}):</b> <span style="font-family:'IBM Plex Mono',monospace;font-weight:600;color:var(--maroon);">${esc(seatListStr)}</span></div>
-              <div><b>Status:</b> <b>${esc(b.paid_status)}</b></div>
+              <div><b>Status:</b> <b>${esc(stampText)}</b></div>
               ${b.pickup_point ? `<div style="grid-column:span 2;"><b>Pickup Stop:</b> 📍 ${esc(b.pickup_point)}</div>` : ''}
             </div>
 
@@ -725,14 +757,7 @@ async function renderPublicPass() {
               <span>Due: <b style="color:${bal > 0 ? 'var(--err)' : 'var(--ok)'};">${fmtMoney(bal)}</b></span>
             </div>
 
-            <div class="ticket-qr-wrap" style="margin-top:16px;">
-              <div id="publicTicketQrArea" class="ticket-qr-box"></div>
-              <div style="font-size:11.5px;color:var(--ink-soft);text-align:right;">
-                <b>Show this QR code at boarding</b><br>
-                Conductor will scan to verify ticket<br>
-                <b style="color:var(--ink);font-family:'IBM Plex Mono',monospace;">PNR: ${esc(b.pnr)}</b>
-              </div>
-            </div>
+            ${qrBlockHtml}
           </div>
 
           <div class="no-print" style="margin-top:16px;display:flex;justify-content:space-between;align-items:center;gap:10px;">
@@ -743,7 +768,7 @@ async function renderPublicPass() {
       </div>
     `;
 
-    if (window.QRCode && document.getElementById('publicTicketQrArea')) {
+    if (!isExpired && window.QRCode && document.getElementById('publicTicketQrArea')) {
       try {
         new QRCode(document.getElementById('publicTicketQrArea'), {
           text: `SEVA-BUS|PNR:${b.pnr}|SEATS:${seatListStr}|FARE:${b.total_amount}|STATUS:${b.paid_status}`,
@@ -3983,10 +4008,10 @@ function openUserPermissionsModal(user) {
 /* ---------- Admin: System Settings & Option 1 Domain ---------- */
 function adminSettingsView() {
   return `
-  <h1 class="page-title">⚙️ System Settings & Passenger Domain</h1>
-  <p class="page-sub">Configure public passenger portal, company branding, and privacy settings.</p>
+  <h1 class="page-title">⚙️ System Settings & Auto-Drive Archive</h1>
+  <p class="page-sub">Configure public passenger portal, company branding, and automated Google Drive trip archival.</p>
 
-  <div class="panel" style="max-width:680px;">
+  <div class="panel" style="max-width:720px;">
     <div class="panel-head">
       <h3>Passenger Portal & Privacy (Option 1)</h3>
     </div>
@@ -3997,7 +4022,7 @@ function adminSettingsView() {
         <input id="settingPortalUrl" type="url" placeholder="https://seva-pass.vercel.app" value="${esc(sysSettings.passengerPortalUrl || '')}">
         <p class="field-hint">
           <b>Option 1 Security:</b> When set (e.g. <code>https://seva-pass.vercel.app</code>), all WhatsApp share links and passenger boarding passes will use this dedicated domain.
-          Passengers will <b>never see or know</b> your private staff portal URL (<code>seva-bus-booking.vercel.app</code>)!
+          Passengers will <b>never see or know</b> your private staff portal URL!
         </p>
       </div>
 
@@ -4015,6 +4040,66 @@ function adminSettingsView() {
 
       <div style="margin-top:24px;border-top:1px solid var(--line);padding-top:16px;display:flex;justify-content:flex-end;">
         <button class="btn btn-primary" id="saveSettingsBtn">💾 Save System Settings</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" style="max-width:720px;margin-top:20px;">
+    <div class="panel-head" style="display:flex;justify-content:space-between;align-items:center;">
+      <h3 style="display:flex;align-items:center;gap:8px;">📦 Auto-Drive Archive & Google Drive Sync</h3>
+      <span class="pill pill-ok" id="archiveStatusBadge" style="font-size:11px;">Checking Drive…</span>
+    </div>
+
+    <div style="padding:18px 20px;">
+      <p style="font-size:13px;color:var(--ink);line-height:1.5;margin-bottom:14px;">
+        <b>Zero-Bloat Database Protection:</b> Automatically exports yesterday's completed trips into labeled ZIP archives (Passenger Manifest CSV, Financial Summary, and DB Recovery JSON), uploads them to your Google Drive, and safely purges old data from the live web database so your database never fills up.
+      </p>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+        <div style="background:var(--ivory);border:1px solid var(--line);border-radius:6px;padding:12px;text-align:center;">
+          <div style="font-size:11.5px;color:var(--ink-soft);font-weight:600;">PENDING PAST TRIPS</div>
+          <div id="statPendingTrips" style="font-size:22px;font-weight:700;color:var(--maroon);margin-top:2px;">—</div>
+          <div style="font-size:11px;color:var(--ink-soft);">Ready to Archive & Purge</div>
+        </div>
+        <div style="background:var(--ivory);border:1px solid var(--line);border-radius:6px;padding:12px;text-align:center;">
+          <div style="font-size:11.5px;color:var(--ink-soft);font-weight:600;">TOTAL ARCHIVED TRIPS</div>
+          <div id="statTotalArchived" style="font-size:22px;font-weight:700;color:var(--ok);margin-top:2px;">—</div>
+          <div style="font-size:11px;color:var(--ink-soft);">Saved in Cloud / Local</div>
+        </div>
+      </div>
+
+      <div style="background:#F0FDF4;border:1px solid #BBF7D0;border-radius:6px;padding:12px 14px;margin-bottom:16px;display:flex;align-items:center;gap:10px;">
+        <span style="font-size:22px;">🛡️</span>
+        <div style="font-size:12.5px;color:#166534;line-height:1.4;">
+          <b>Pass Expiry (Option 1) Active:</b> When a trip date passes, passenger ticket links automatically expire and QR verification is closed, preventing any passenger from misusing old tickets.
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="settingDriveFolderId">📂 Google Drive Folder ID</label>
+        <input id="settingDriveFolderId" type="text" placeholder="e.g. 1AbCdEfGhIjKlMnOpQrStUvWxYz..." value="">
+        <p class="field-hint">Open your Google Drive folder in a browser and copy the folder ID from the URL.</p>
+      </div>
+
+      <div class="field" style="margin-top:14px;">
+        <label for="settingDriveSaJson">🔑 Google Service Account JSON</label>
+        <textarea id="settingDriveSaJson" rows="3" placeholder='Paste contents of service_account.json here (or configure via environment variables)' style="font-family:\'IBM Plex Mono\',monospace;font-size:11px;"></textarea>
+        <p class="field-hint">If left blank, archives are safely saved locally on the server and downloadable anytime below.</p>
+      </div>
+
+      <div style="margin-top:16px;display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;">
+        <button class="btn btn-secondary btn-sm" id="saveDriveConfigBtn">💾 Save Drive Config</button>
+        <button class="btn btn-primary btn-sm" id="runArchiveNowBtn">🚀 Run Auto-Drive Archive Now</button>
+      </div>
+
+      <div style="margin-top:22px;border-top:1px solid var(--line);padding-top:14px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+          <h4 style="margin:0;font-size:14px;">Past Archived Trips</h4>
+          <button class="btn btn-secondary btn-sm" id="refreshArchiveHistoryBtn" style="padding:4px 8px;font-size:11px;">🔄 Refresh</button>
+        </div>
+        <div id="archiveHistoryTableArea" style="font-size:12.5px;">
+          <div class="empty" style="padding:16px 0;"><span class="spin"></span> Loading archive history…</div>
+        </div>
       </div>
     </div>
   </div>`;
@@ -4036,6 +4121,111 @@ async function loadPublicSettings() {
   }
 }
 
+async function loadArchiveStatus() {
+  try {
+    const st = await api('/archive/status');
+    const badge = document.getElementById('archiveStatusBadge');
+    const statPending = document.getElementById('statPendingTrips');
+    const statTotal = document.getElementById('statTotalArchived');
+    const folderInput = document.getElementById('settingDriveFolderId');
+
+    if (statPending) statPending.textContent = st.pendingTripsCount;
+    if (statTotal) statTotal.textContent = st.totalArchivedCount;
+    if (folderInput && st.driveFolderId) folderInput.value = st.driveFolderId;
+
+    if (badge) {
+      if (st.driveConfigured) {
+        badge.className = 'pill pill-ok';
+        badge.textContent = '🟢 Google Drive Connected';
+      } else {
+        badge.className = 'pill';
+        badge.style.background = '#F1F5F9';
+        badge.style.color = '#475569';
+        badge.textContent = '⚪ Local Archive Active';
+      }
+    }
+  } catch (e) {}
+
+  await loadArchiveHistory();
+}
+
+async function loadArchiveHistory() {
+  const area = document.getElementById('archiveHistoryTableArea');
+  if (!area) return;
+
+  try {
+    const list = await api('/archive/history');
+    if (!list || list.length === 0) {
+      area.innerHTML = '<div class="empty" style="padding:16px 0;">No trips have been archived yet. Click "Run Auto-Drive Archive Now" to package past trips.</div>';
+      return;
+    }
+
+    const rows = list.map((a) => {
+      const driveBtn = a.drive_web_link
+        ? `<a href="${esc(a.drive_web_link)}" target="_blank" class="btn btn-secondary btn-sm" style="padding:3px 7px;font-size:11px;text-decoration:none;">Drive ↗</a>`
+        : '<span style="color:var(--ink-soft);font-size:11px;">Local</span>';
+
+      return `
+        <tr>
+          <td><b>${esc(a.trip_date)}</b></td>
+          <td><b>${esc(a.route_name || 'Route')}</b><br><small style="color:var(--ink-soft);">${esc(a.bus_name || 'Bus')}</small></td>
+          <td>${a.total_bookings} bookings<br><small style="color:var(--ink-soft);">${a.total_seats} seats</small></td>
+          <td><b>${fmtMoney(a.total_revenue)}</b></td>
+          <td style="text-align:right;white-space:nowrap;">
+            ${driveBtn}
+            <button class="btn btn-secondary btn-sm" data-dl-archive="${a.id}" style="padding:3px 7px;font-size:11px;margin-left:4px;">⬇ ZIP</button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    area.innerHTML = `
+      <div class="table-wrap" style="margin:0;">
+        <table style="width:100%;">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Route / Bus</th>
+              <th>Bookings</th>
+              <th>Revenue</th>
+              <th style="text-align:right;">Actions</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    `;
+
+    area.querySelectorAll('[data-dl-archive]').forEach((btn) => {
+      btn.onclick = async () => {
+        const id = btn.getAttribute('data-dl-archive');
+        btn.disabled = true;
+        try {
+          const res = await fetch('/api/archive/download/' + id, {
+            headers: { Authorization: 'Bearer ' + getToken() }
+          });
+          if (!res.ok) throw new Error('Download failed');
+          const blob = await res.blob();
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `SevaBus_Archive_${id}.zip`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+        } catch (err) {
+          toast(err.message || 'Download error');
+        } finally {
+          btn.disabled = false;
+        }
+      };
+    });
+
+  } catch (err) {
+    area.innerHTML = `<div class="empty" style="color:var(--err);padding:12px 0;">Failed to load archive history: ${esc(err.message)}</div>`;
+  }
+}
+
 async function attachAdminSettings() {
   try {
     const data = await api('/settings');
@@ -4054,6 +4244,8 @@ async function attachAdminSettings() {
   } catch (err) {
     toast(err.message);
   }
+
+  loadArchiveStatus();
 
   const saveBtn = document.getElementById('saveSettingsBtn');
   if (saveBtn) {
@@ -4087,6 +4279,63 @@ async function attachAdminSettings() {
         saveBtn.textContent = '💾 Save System Settings';
       }
     };
+  }
+
+  const saveDriveBtn = document.getElementById('saveDriveConfigBtn');
+  if (saveDriveBtn) {
+    saveDriveBtn.onclick = async () => {
+      saveDriveBtn.disabled = true;
+      saveDriveBtn.textContent = 'Saving…';
+      try {
+        const folderId = (document.getElementById('settingDriveFolderId').value || '').trim();
+        const saJson = (document.getElementById('settingDriveSaJson').value || '').trim();
+
+        const res = await api('/archive/config', {
+          method: 'POST',
+          body: JSON.stringify({
+            google_drive_folder_id: folderId,
+            google_service_account_json: saJson,
+          }),
+        });
+
+        toast(res.driveConfigured ? 'Google Drive connected successfully!' : 'Drive configuration saved.');
+        await loadArchiveStatus();
+      } catch (err) {
+        toast(err.message || 'Failed to save Drive config');
+      } finally {
+        saveDriveBtn.disabled = false;
+        saveDriveBtn.textContent = '💾 Save Drive Config';
+      }
+    };
+  }
+
+  const runArchiveBtn = document.getElementById('runArchiveNowBtn');
+  if (runArchiveBtn) {
+    runArchiveBtn.onclick = async () => {
+      if (!confirm('Run Auto-Drive Archive now? This will package completed past trips into labeled ZIPs, upload to Drive, and safely purge their bookings to keep the database light and fast.')) return;
+      runArchiveBtn.disabled = true;
+      runArchiveBtn.innerHTML = '<span class="spin"></span> Archiving trips…';
+      try {
+        const res = await api('/archive/run', { method: 'POST' });
+        const count = (res.archived && res.archived.length) || 0;
+        if (count > 0) {
+          toast(`Successfully archived & purged ${count} past trip(s)!`);
+        } else {
+          toast('No pending past trips needed archiving.');
+        }
+        await loadArchiveStatus();
+      } catch (err) {
+        toast('Archive error: ' + err.message);
+      } finally {
+        runArchiveBtn.disabled = false;
+        runArchiveBtn.textContent = '🚀 Run Auto-Drive Archive Now';
+      }
+    };
+  }
+
+  const refreshBtn = document.getElementById('refreshArchiveHistoryBtn');
+  if (refreshBtn) {
+    refreshBtn.onclick = () => loadArchiveStatus();
   }
 }
 

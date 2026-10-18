@@ -53,10 +53,28 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
 });
 
+const { runAutoDriveArchive } = require('./archive');
+
 const PORT = process.env.PORT || 4000;
 if (!process.env.VERCEL) {
   app.listen(PORT, () => {
     console.log(`Seva Bus Booking server running on http://localhost:${PORT}`);
+    // Auto-Drive Archive background check
+    setTimeout(async () => {
+      try {
+        const res = await runAutoDriveArchive();
+        if (res.archived && res.archived.length > 0) {
+          console.log(`[Auto-Drive Archive] Automatically archived & purged ${res.archived.length} completed past trip(s).`);
+        }
+      } catch (e) {
+        console.warn('[Auto-Drive Archive] Background check notice:', e.message);
+      }
+    }, 5000);
+    setInterval(async () => {
+      try {
+        await runAutoDriveArchive();
+      } catch (e) {}
+    }, 6 * 60 * 60 * 1000);
   });
 }
 

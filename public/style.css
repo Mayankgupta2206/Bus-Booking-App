@@ -815,7 +815,23 @@ tbody tr:hover{background:var(--ivory);}
   color: var(--ink-soft);
   margin-top: 4px;
   line-height: 1.4;
+.ticket-stamp {
+  position: absolute;
+  right: 20px;
+  top: 20px;
+  border: 2px solid;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  transform: rotate(-6deg);
 }
+.stamp-paid { color: var(--ok); border-color: var(--ok); background: #DCFCE7; }
+.stamp-partial { color: var(--saffron); border-color: var(--saffron); background: #FEF3C7; }
+.stamp-unpaid { color: var(--err); border-color: var(--err); background: #FEE2E2; }
+.stamp-expired { color: #64748B; border-color: #64748B; background: #F1F5F9; }
 
 @media print {
   .no-print, .topnav, .toastwrap, .usermenu, .mode-toggle, .tabbar, .tooltip, .actions-row, button.btn { display: none !important; }
