@@ -4082,9 +4082,15 @@ function adminSettingsView() {
       </div>
 
       <div class="field" style="margin-top:14px;">
-        <label for="settingDriveSaJson">🔑 Google Service Account JSON</label>
+        <label for="settingDriveScriptUrl">⚡ Google Apps Script Web App URL (Recommended for Personal @gmail.com)</label>
+        <input id="settingDriveScriptUrl" type="url" placeholder="https://script.google.com/macros/s/AKfycb.../exec" value="">
+        <p class="field-hint">Solves Google "Service Accounts do not have storage quota" on personal Gmail accounts. Uploads directly using your 15GB free storage.</p>
+      </div>
+
+      <div class="field" style="margin-top:14px;">
+        <label for="settingDriveSaJson">🔑 Google Service Account JSON (Alternative for Google Workspace / Shared Drives)</label>
         <textarea id="settingDriveSaJson" rows="3" placeholder='Paste contents of service_account.json here (or configure via environment variables)' style="font-family:\'IBM Plex Mono\',monospace;font-size:11px;"></textarea>
-        <p class="field-hint">If left blank, archives are safely saved locally on the server and downloadable anytime below.</p>
+        <p class="field-hint">If left blank and no Script URL is provided, archives are safely saved locally on the server and downloadable anytime below.</p>
       </div>
 
       <div style="margin-top:16px;display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;">
@@ -4128,10 +4134,12 @@ async function loadArchiveStatus() {
     const statPending = document.getElementById('statPendingTrips');
     const statTotal = document.getElementById('statTotalArchived');
     const folderInput = document.getElementById('settingDriveFolderId');
+    const scriptUrlInput = document.getElementById('settingDriveScriptUrl');
 
     if (statPending) statPending.textContent = st.pendingTripsCount;
     if (statTotal) statTotal.textContent = st.totalArchivedCount;
     if (folderInput && st.driveFolderId) folderInput.value = st.driveFolderId;
+    if (scriptUrlInput && st.driveScriptUrl) scriptUrlInput.value = st.driveScriptUrl;
 
     if (badge) {
       if (st.driveConfigured) {
@@ -4288,12 +4296,14 @@ async function attachAdminSettings() {
       saveDriveBtn.textContent = 'Saving…';
       try {
         const folderId = (document.getElementById('settingDriveFolderId').value || '').trim();
+        const scriptUrl = (document.getElementById('settingDriveScriptUrl').value || '').trim();
         const saJson = (document.getElementById('settingDriveSaJson').value || '').trim();
 
         const res = await api('/archive/config', {
           method: 'POST',
           body: JSON.stringify({
             google_drive_folder_id: folderId,
+            google_drive_script_url: scriptUrl,
             google_service_account_json: saJson,
           }),
         });

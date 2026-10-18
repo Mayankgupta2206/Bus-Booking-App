@@ -56,16 +56,38 @@ function getSetting(key) {
   return process.env[key] || process.env[key.toUpperCase()] || '';
 }
 
+function cleanFolderId(input) {
+  if (!input) return '';
+  let str = String(input).trim();
+  const match = str.match(/folders\/([a-zA-Z0-9_\-]+)/);
+  if (match) return match[1];
+  str = str.split('?')[0].split('#')[0].trim();
+  return str;
+}
+
 /**
  * Initializes Google Drive client if credentials are configured
  */
 function getGoogleDriveClient() {
-  const folderId = getSetting('google_drive_folder_id') || process.env.GOOGLE_DRIVE_FOLDER_ID || '';
-  const saJsonRaw = getSetting('google_service_account_json') || process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '';
+  const folderId = cleanFolderId(getSetting('google_drive_folder_id') || process.env.GOOGLE_DRIVE_FOLDER_ID || '');
+  const scriptUrl = getSetting('google_drive_script_url') || process.env.GOOGLE_DRIVE_SCRIPT_URL || '';
 
   if (!folderId) {
     return null;
   }
+
+  // 1. Google Apps Script Webhook (Recommended for personal Gmail accounts, 0 quota issues)
+  if (scriptUrl) {
+    return {
+      type: 'script',
+      scriptUrl: scriptUrl.trim(),
+      folderId,
+      clientEmail: 'Google Drive Webhook (Personal Account)'
+    };
+  }
+
+  // 2. Google Service Account (Shared Drives / Workspace)
+  const saJsonRaw = getSetting('google_service_account_json') || process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '';
 
   try {
     let credentials = null;
@@ -96,7 +118,7 @@ function getGoogleDriveClient() {
     });
 
     const drive = google.drive({ version: 'v3', auth });
-    return { drive, folderId, clientEmail: credentials.client_email };
+    return { type: 'jwt', drive, folderId, clientEmail: credentials.client_email };
   } catch (err) {
     console.warn('Google Drive client init notice:', err.message);
     return null;
@@ -287,6 +309,30 @@ async function buildTripArchive(tripId) {
  * Uploads a file buffer directly to Google Drive
  */
 async function uploadToGoogleDrive(driveClient, fileName, fileBuffer) {
+  if (driveClient.type === 'script') {
+    const base64Content = fileBuffer.toString('base64');
+    const response = await fetch(driveClient.scriptUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        folderId: driveClient.folderId,
+        fileName,
+        mimeType: 'application/zip',
+        base64Content,
+      }),
+      redirect: 'follow',
+    });
+    const resData = await response.json();
+    if (!resData.success && resData.error) {
+      throw new Error(resData.error);
+    }
+    return {
+      fileId: resData.fileId,
+      webViewLink: resData.webViewLink || `https://drive.google.com/file/d/${resData.fileId}/view`,
+      webContentLink: resData.webViewLink,
+    };
+  }
+
   const { drive, folderId } = driveClient;
   const stream = new Readable();
   stream.push(fileBuffer);

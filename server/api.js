@@ -1144,6 +1144,15 @@ router.post('/settings', requireAuth, requirePerm('can_manage_settings'), (req, 
 });
 
 /* ---------- Auto-Drive Archive & Google Drive Sync Endpoints ---------- */
+function cleanDriveFolderId(input) {
+  if (!input) return '';
+  let str = String(input).trim();
+  const match = str.match(/folders\/([a-zA-Z0-9_\-]+)/);
+  if (match) return match[1];
+  str = str.split('?')[0].split('#')[0].trim();
+  return str;
+}
+
 router.get('/archive/status', requireAuth, (req, res) => {
   const driveClient = getGoogleDriveClient();
   const today = getTodayDateIST();
@@ -1163,6 +1172,7 @@ router.get('/archive/status', requireAuth, (req, res) => {
     today,
     driveConfigured: Boolean(driveClient),
     driveFolderId: folderId,
+    driveScriptUrl: getSetting('google_drive_script_url', ''),
     clientEmail: driveClient ? driveClient.clientEmail : (getSetting('google_service_account_email', '') || null),
     pendingTripsCount: pending?.c || 0,
     totalArchivedCount: totalArchived,
@@ -1226,9 +1236,10 @@ router.get('/archive/download/:id', requireAuth, (req, res) => {
 });
 
 router.post('/archive/config', requireAuth, requirePerm('can_manage_settings'), (req, res) => {
-  const { google_drive_folder_id, google_service_account_json, google_service_account_email, google_private_key } = req.body || {};
+  const { google_drive_folder_id, google_drive_script_url, google_service_account_json, google_service_account_email, google_private_key } = req.body || {};
 
-  if (google_drive_folder_id !== undefined) setSetting('google_drive_folder_id', String(google_drive_folder_id).trim());
+  if (google_drive_folder_id !== undefined) setSetting('google_drive_folder_id', cleanDriveFolderId(google_drive_folder_id));
+  if (google_drive_script_url !== undefined) setSetting('google_drive_script_url', String(google_drive_script_url).trim());
   if (google_service_account_json !== undefined) setSetting('google_service_account_json', String(google_service_account_json).trim());
   if (google_service_account_email !== undefined) setSetting('google_service_account_email', String(google_service_account_email).trim());
   if (google_private_key !== undefined) setSetting('google_private_key', String(google_private_key).trim());
@@ -1240,6 +1251,7 @@ router.post('/archive/config', requireAuth, requirePerm('can_manage_settings'), 
     ok: true,
     driveConfigured: Boolean(driveClient),
     driveFolderId: getSetting('google_drive_folder_id', ''),
+    driveScriptUrl: getSetting('google_drive_script_url', ''),
     clientEmail: driveClient ? driveClient.clientEmail : null,
   });
 });
