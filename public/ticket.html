@@ -331,7 +331,7 @@ function renderSearchForm(container, message) {
 function renderMultipleBookings(container, data) {
   const bookings = data.bookings || [];
   const cardsHtml = bookings.map((b) => {
-    const seats = b.seats || [];
+    const seats = (b.seats || []).slice().sort((a, b) => String(a.seat_label || '').localeCompare(String(b.seat_label || ''), undefined, { numeric: true, sensitivity: 'base' }));
     const seatStr = seats.map((s) => s.seat_label).join(', ');
     const stampClass = b.paid_status === 'Paid' ? 'stamp-paid' : b.paid_status === 'Partial' ? 'stamp-partial' : 'stamp-unpaid';
     return `
@@ -408,7 +408,7 @@ function showSearch() {
 window.addEventListener('popstate', () => loadTicket());
 
 function renderBoardingPass(container, b) {
-  const seats = b.seats || [];
+  const seats = (b.seats || []).slice().sort((a, b) => String(a.seat_label || '').localeCompare(String(b.seat_label || ''), undefined, { numeric: true, sensitivity: 'base' }));
   const seatListStr = seats.map(s => s.seat_label).join(', ');
   const bal = Math.max(0, Number(b.total_amount || 0) - Number(b.amount_paid || 0));
   const isExpired = Boolean(b.expired);

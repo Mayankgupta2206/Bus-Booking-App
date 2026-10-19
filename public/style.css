@@ -100,7 +100,7 @@ tr:last-child td{border-bottom:none;}
 .booking-grid{display:grid;grid-template-columns:1.15fr 1fr;gap:18px;}
 @media (max-width:820px){.booking-grid{grid-template-columns:1fr;}}
 .seatmap{display:grid;grid-template-columns:repeat(5,44px);gap:8px 8px;margin-bottom:14px;}
-.seat{width:44px;height:44px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:600;font-family:'IBM Plex Mono',monospace;border:1.5px solid transparent;}
+.seat{width:44px;height:44px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:600;font-family:'IBM Plex Mono',monospace;border:1.5px solid transparent;touch-action:manipulation;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none;}
 .seat.aisle{background:transparent;}
 .seat-avail{background:var(--seat-avail-bg);color:var(--seat-avail);border-color:var(--seat-avail);cursor:pointer;}
 .seat-booked{background:var(--seat-booked-bg);color:var(--seat-booked);border-color:var(--seat-booked);cursor:not-allowed;}
@@ -851,4 +851,52 @@ tbody tr:hover{background:var(--ivory);}
   .manifest-table th, .manifest-table td { padding: 4px 6px; border-bottom: 1px solid #ddd; }
   .pill { border: 1px solid #999; }
   a { text-decoration: none; color: inherit; }
+}
+
+.trip-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  gap: 14px;
+  margin-top: 10px;
+}
+.trip-card {
+  background: #FFFFFF;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-shadow: 0 1px 4px rgba(36,28,22,.04);
+  transition: transform .15s ease, border-color .15s ease, box-shadow .15s ease;
+}
+.trip-card:hover {
+  border-color: var(--maroon);
+  box-shadow: 0 4px 12px rgba(124,26,34,.08);
+  transform: translateY(-2px);
+}
+
+/* Modern Dashboard UI */
+/* Modern Dashboard UI */
+.trip-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  gap: 14px;
+  margin-top: 10px;
+}
+.trip-card {
+  background: #FFFFFF;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-shadow: 0 1px 4px rgba(36,28,22,.04);
+  transition: transform .15s ease, border-color .15s ease, box-shadow .15s ease;
+}
+.trip-card:hover {
+  border-color: var(--maroon);
+  box-shadow: 0 4px 12px rgba(124,26,34,.08);
+  transform: translateY(-2px);
 }

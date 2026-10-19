@@ -36,7 +36,7 @@ function enrichBus(bus) {
 }
 
 /* ---------- Auth ---------- */
-router.post('/auth/login', loginLimiter, (req, res) => {
+router.post('/auth/login', loginLimiter, async (req, res) => {
   if (req.isPassengerMode) {
     return res.status(403).json({ error: 'Administrative login is disabled on the passenger boarding pass portal.' });
   }
@@ -45,7 +45,11 @@ router.post('/auth/login', loginLimiter, (req, res) => {
     return res.status(400).json({ error: 'Username and password are required.' });
   }
   const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
-  if (!user || !bcrypt.compareSync(password, user.password_hash)) {
+  if (!user) {
+    return res.status(401).json({ error: 'Invalid username or password.' });
+  }
+  const match = await bcrypt.compare(password, user.password_hash);
+  if (!match) {
     return res.status(401).json({ error: 'Invalid username or password.' });
   }
   const token = signToken(user);
@@ -60,6 +64,11 @@ router.post('/auth/login', loginLimiter, (req, res) => {
       permissions: parseUserPermissions(user)
     }
   });
+});
+
+router.post('/auth/logout', requireAuth, (req, res) => {
+  logAudit('USER_LOGOUT', 'USER', req.user.username, { name: req.user.name, role: req.user.role }, req.user.name, req.user.role);
+  res.json({ ok: true, message: 'Logged out successfully.' });
 });
 
 router.get('/me', requireAuth, (req, res) => {
@@ -844,6 +853,9 @@ router.post('/bookings', requireAuth, requireAgentOrAdmin, (req, res) => {
   if (!pnr) pnr = 'PNR' + Date.now().toString().slice(-6);
 
   let bookingId;
+  // Ensure seats are inserted in natural serial order (1, 2... 10... or 1A, 1B...)
+  processedSeats.sort((a, b) => String(a.label).localeCompare(String(b.label), undefined, { numeric: true, sensitivity: 'base' }));
+
   const tx = db.transaction(() => {
     const bookingInfo = db.prepare(`INSERT INTO bookings
       (pnr, trip_id, booked_by, booked_by_username, booked_by_role, is_group, group_contact,
@@ -910,7 +922,7 @@ router.get('/bookings', requireAuth, (req, res) => {
   const bookings = db.prepare(sql).all(...params);
   const result = bookings.map((b) => ({
     ...b,
-    seats: db.prepare('SELECT * FROM booking_seats WHERE booking_id = ?').all(b.id),
+    seats: db.prepare('SELECT * FROM booking_seats WHERE booking_id = ? ORDER BY CAST(seat_label AS INTEGER), seat_label ASC').all(b.id),
   }));
   res.json(result);
 });
@@ -948,7 +960,7 @@ router.get('/bookings/search', requireAuth, (req, res) => {
 
   const withSeats = bookings.map((b) => ({
     ...b,
-    seats: db.prepare('SELECT * FROM booking_seats WHERE booking_id = ?').all(b.id),
+    seats: db.prepare('SELECT * FROM booking_seats WHERE booking_id = ? ORDER BY CAST(seat_label AS INTEGER), seat_label ASC').all(b.id),
   }));
 
   const cancelled = db.prepare(`
@@ -1031,7 +1043,7 @@ router.get(['/public/pass', '/public/pass/:pnr'], (req, res) => {
         SELECT id, seat_label, passenger_name, age, gender, contact, concession, seat_fare, boarded
         FROM booking_seats
         WHERE booking_id = ?
-        ORDER BY seat_label ASC
+        ORDER BY CAST(seat_label AS INTEGER), seat_label ASC
       `).all(b.id);
       return res.json({
         ...b,
@@ -1048,7 +1060,7 @@ router.get(['/public/pass', '/public/pass/:pnr'], (req, res) => {
           SELECT id, seat_label, passenger_name, age, gender, contact, concession, seat_fare, boarded
           FROM booking_seats
           WHERE booking_id = ?
-          ORDER BY seat_label ASC
+          ORDER BY CAST(seat_label AS INTEGER), seat_label ASC
         `).all(b.id),
         expired: isTripExpired(b.trip_date, b.trip_status)
       }));
@@ -1093,7 +1105,7 @@ router.get('/bookings/:id', requireAuth, (req, res) => {
     WHERE b.id = ?
   `).get(req.params.id);
   if (!b) return res.status(404).json({ error: 'Booking not found.' });
-  const seats = db.prepare('SELECT * FROM booking_seats WHERE booking_id = ?').all(b.id);
+  const seats = db.prepare('SELECT * FROM booking_seats WHERE booking_id = ? ORDER BY CAST(seat_label AS INTEGER), seat_label ASC').all(b.id);
   res.json({ ...b, seats });
 });
 
@@ -1166,7 +1178,7 @@ router.get('/dashboard/stats', requireAuth, (req, res) => {
     WHERE t.status != 'Cancelled'
   `).get().pending_due;
 
-  // Recent bookings (latest 6)
+  // Recent bookings (latest 8)
   const recentBookings = db.prepare(`
     SELECT b.*, t.date AS trip_date, t.time AS trip_time, t.status AS trip_status,
            r.name AS route_name, bu.name AS bus_name,
@@ -1176,8 +1188,75 @@ router.get('/dashboard/stats', requireAuth, (req, res) => {
     JOIN routes r ON r.id = t.route_id
     JOIN buses bu ON bu.id = t.bus_id
     ORDER BY b.id DESC
-    LIMIT 6
+    LIMIT 8
   `).all();
+
+  // Active trips with live boarding progress & trip dues
+  const activeTrips = trips.map((t) => {
+    const layout = getBusLayout(t);
+    const cap = countSeats(layout);
+    const bookedCount = db.prepare('SELECT COUNT(*) AS c FROM booking_seats WHERE trip_id = ?').get(t.id).c;
+    const boardedCount = db.prepare('SELECT COUNT(*) AS c FROM booking_seats WHERE trip_id = ? AND boarded = 1').get(t.id).c;
+    const due = db.prepare(`
+      SELECT COALESCE(SUM(b.total_amount - b.amount_paid), 0) AS due
+      FROM bookings b WHERE b.trip_id = ? AND (b.total_amount - b.amount_paid) > 0
+    `).get(t.id).due;
+    return {
+      id: t.id,
+      route_name: t.route_name,
+      source: t.source,
+      destination: t.destination,
+      bus_name: t.bus_name,
+      time: t.time,
+      date: t.date,
+      status: t.status,
+      capacity: cap,
+      bookedCount,
+      boardedCount,
+      dueAmt: due,
+      occupancyPct: cap > 0 ? Math.round((bookedCount / cap) * 100) : 0,
+      boardedPct: bookedCount > 0 ? Math.round((boardedCount / bookedCount) * 100) : 0
+    };
+  });
+
+  const dueBookingsCountToday = db.prepare(`
+    SELECT COUNT(*) AS c
+    FROM bookings b
+    JOIN trips t ON t.id = b.trip_id
+    WHERE t.date = ? AND t.status != 'Cancelled' AND (b.total_amount - b.amount_paid) > 0
+  `).get(targetDate).c;
+
+  // Upcoming trips (future departures after targetDate)
+  const rawUpcoming = db.prepare(`
+    SELECT t.*, r.name AS route_name, r.source, r.destination, r.fare AS fare, bu.name AS bus_name,
+           bu.rows AS bus_rows, bu.cols AS bus_cols, bu.layout_json
+    FROM trips t
+    JOIN routes r ON r.id = t.route_id
+    JOIN buses bu ON bu.id = t.bus_id
+    WHERE t.date > ? AND t.status = 'Planned'
+    ORDER BY t.date ASC, t.time ASC
+    LIMIT 8
+  `).all(targetDate);
+
+  const upcomingTrips = rawUpcoming.map((t) => {
+    const layout = getBusLayout(t);
+    const cap = countSeats(layout);
+    const bookedCount = db.prepare('SELECT COUNT(*) AS c FROM booking_seats WHERE trip_id = ?').get(t.id).c;
+    return {
+      id: t.id,
+      route_name: t.route_name,
+      source: t.source,
+      destination: t.destination,
+      bus_name: t.bus_name,
+      time: t.time,
+      date: t.date,
+      fare: t.fare,
+      capacity: cap,
+      bookedCount,
+      availableSeats: Math.max(0, cap - bookedCount),
+      occupancyPct: cap > 0 ? Math.round((bookedCount / cap) * 100) : 0,
+    };
+  });
 
   res.json({
     date: targetDate,
@@ -1195,7 +1274,10 @@ router.get('/dashboard/stats', requireAuth, (req, res) => {
     upiCollectedToday: finRow ? finRow.upi_collected : 0,
     cardCollectedToday: finRow ? finRow.card_collected : 0,
     dueToday: finRow ? finRow.due : 0,
+    dueBookingsCountToday,
     totalDueAllTime: allTimeDue,
+    activeTrips,
+    upcomingTrips,
     recentBookings,
   });
 });
@@ -1218,7 +1300,7 @@ router.delete('/bookings/:id', requireAuth, (req, res) => {
     return res.status(403).json({ error: 'You do not have permission to cancel this booking.' });
   }
 
-  const seats = db.prepare('SELECT * FROM booking_seats WHERE booking_id = ?').all(booking.id);
+  const seats = db.prepare('SELECT * FROM booking_seats WHERE booking_id = ? ORDER BY CAST(seat_label AS INTEGER), seat_label ASC').all(booking.id);
   const seatLabels = seats.map((s) => s.seat_label).join(', ');
   const refundNotes = req.body?.refundNotes || req.query?.refundNotes || 'Cancelled by staff';
 
@@ -1499,7 +1581,7 @@ router.post('/bookings/:id/pay-balance', requireAuth, requirePerm('can_collect_p
   }, req.user.name, req.user.role);
 
   const updated = db.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id);
-  const seats = db.prepare('SELECT * FROM booking_seats WHERE booking_id = ?').all(req.params.id);
+  const seats = db.prepare('SELECT * FROM booking_seats WHERE booking_id = ? ORDER BY CAST(seat_label AS INTEGER), seat_label ASC').all(req.params.id);
   res.json({ success: true, booking: { ...updated, seats }, amountPaid: newPaid, paidStatus: newStatus });
 });
 

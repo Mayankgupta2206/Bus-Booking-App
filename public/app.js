@@ -190,6 +190,15 @@ function layoutWidth(grid) {
 }
 function cloneLayout(grid) { return grid.map((row) => row.map((c) => c)); }
 
+function sortSeatsSerially(arr) {
+  if (!Array.isArray(arr)) return [];
+  return arr.slice().sort((a, b) => {
+    const la = typeof a === 'object' && a !== null ? String(a.seat_label || a.label || '') : String(a || '');
+    const lb = typeof b === 'object' && b !== null ? String(b.seat_label || b.label || '') : String(b || '');
+    return la.localeCompare(lb, undefined, { numeric: true, sensitivity: 'base' });
+  });
+}
+
 /* ---------- Toast ---------- */
 function ensureToastWrap() {
   let w = document.getElementById('toastwrap');
@@ -269,8 +278,11 @@ function nav(path, pushHash = true, scrollToTop = true) {
   render();
   if (scrollToTop) window.scrollTo(0, 0);
 }
-function logout() {
+async function logout() {
   if (inactivityTimer) { clearTimeout(inactivityTimer); inactivityTimer = null; }
+  try {
+    await api('/auth/logout', { method: 'POST' }).catch(() => {});
+  } catch {}
   clearToken();
   state.user = null;
   Cache = { routes: [], buses: [], concessions: [] };
@@ -337,7 +349,7 @@ function attachLogin() {
       setToken(data.token);
       state.user = data.user;
       resetInactivityTimer();
-      await loadCaches();
+      loadCaches();
       nav('#/dashboard');
     } catch (e) {
       errEl.textContent = e.message || 'Invalid username or password.';
@@ -545,7 +557,7 @@ function shareTicketWhatsapp(booking, trip) {
   const date = fmtDate(trip?.date || booking.trip_date);
   const time = trip?.time || booking.trip_time || '';
   const bus = trip?.bus_name || booking.bus_name || 'Seva Bus';
-  const seats = booking.seats || [];
+  const seats = sortSeatsSerially(booking.seats || []);
   const seatListStr = seats.map((s) => s.seat_label).join(', ');
   const total = fmtMoney(booking.total_amount);
   const paid = fmtMoney(booking.amount_paid);
@@ -652,7 +664,7 @@ async function renderPublicPass() {
     if (data.multiple) {
       const bookings = data.bookings || [];
       const cardsHtml = bookings.map((b) => {
-        const seats = b.seats || [];
+        const seats = sortSeatsSerially(b.seats || []);
         const seatStr = seats.map((s) => s.seat_label).join(', ');
         return `
           <div style="background:#FAF8F5;border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:12px;display:flex;flex-direction:column;gap:8px;">
@@ -704,7 +716,7 @@ async function renderPublicPass() {
     const isExpired = Boolean(b.expired);
     const stampText = isExpired ? 'EXPIRED' : b.paid_status;
     const stampClass = isExpired ? 'stamp-expired' : (b.paid_status === 'Paid' ? 'stamp-paid' : b.paid_status === 'Partial' ? 'stamp-partial' : 'stamp-unpaid');
-    const seats = b.seats || [];
+    const seats = sortSeatsSerially(b.seats || []);
     const seatListStr = seats.map((s) => s.seat_label).join(', ');
     const bal = Math.max(0, Number(b.total_amount || 0) - Number(b.amount_paid || 0));
 
@@ -870,7 +882,7 @@ async function renderPublicPass() {
 
 function openTicketModal(booking, trip) {
   closeModal();
-  const seats = booking.seats || [];
+  const seats = sortSeatsSerially(booking.seats || []);
   const seatListStr = seats.map((s) => s.seat_label).join(', ');
   const discountAmt = Number(booking.discount_amount || 0);
   const couponCode = booking.coupon_code ? String(booking.coupon_code).trim() : '';
@@ -1221,6 +1233,68 @@ function downloadManifestCsv(trip, bookings) {
 }
 
 /* ---------- Dashboard ---------- */
+async function openTripManifestDirectly(tripId, tripDate) {
+  try {
+    toast('Opening bus manifest & seat chart...');
+    const qs = new URLSearchParams();
+    if (tripDate) qs.set('date', tripDate);
+    const [trip, seatData, bookings, tripsList] = await Promise.all([
+      api('/trips/' + tripId),
+      api('/trips/' + tripId + '/seats'),
+      api('/bookings?tripId=' + tripId),
+      api('/trips?' + qs.toString()).catch(() => [])
+    ]);
+    manifestCtx.tripId = String(tripId);
+    manifestCtx.date = trip.date;
+    manifestCtx.trips = (tripsList && tripsList.length) ? tripsList : [trip];
+    manifestCtx.tripsLoaded = true;
+    manifestCtx.data = { trip, seatData, bookings };
+    nav('#/manifest');
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+async function openTripBookingDirectly(tripId) {
+  try {
+    toast('Opening seat booking...');
+    const seatData = await api('/trips/' + tripId + '/seats');
+    const trip = seatData.trip || (await api('/trips/' + tripId));
+    bookingCtx = {
+      step: 2, tripId, trip, seatData, selected: [], pax: {},
+      mode: 'individual', groupContact: '', applyAll: true,
+      lead: { name: '', age: '', gender: '', concession: 'General' }, advancePaid: '',
+      couponCode: '', appliedCoupon: '', couponDiscount: 0, manualDiscount: 0, discountReason: '',
+    };
+    nav('#/booking');
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+function renderDashboardAlertsHtml(stats) {
+  if (!stats) return '';
+  const dueToday = Number(stats.dueToday || 0);
+  const dueCount = Number(stats.dueBookingsCountToday || 0);
+  if (dueToday <= 0 && dueCount <= 0) return '';
+  return `
+    <div style="background:#FFFBEB;border:1.5px solid #FCD34D;border-radius:8px;padding:12px 18px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+      <div style="display:flex;align-items:center;gap:12px;">
+        <span style="font-size:26px;">⚠️</span>
+        <div>
+          <div style="font-weight:700;font-size:14px;color:#92400E;">Pending Collections Alert (Today's Departures)</div>
+          <div style="font-size:12.5px;color:#B45309;margin-top:2px;">
+            <b>${fmtMoney(dueToday)}</b> balance is pending collection across <b>${dueCount} booking(s)</b> today. Conductor / staff should collect before departure.
+          </div>
+        </div>
+      </div>
+      <button class="btn btn-secondary btn-sm" style="border-color:#F59E0B;color:#92400E;background:#FEF3C7;font-weight:600;" data-nav="#/manifest">
+        View Boarding Manifest ➔
+      </button>
+    </div>
+  `;
+}
+
 function renderDashboardMetricsHtml(stats) {
   if (!dashboardCtx.loaded) {
     return `<div class="panel"><div class="empty"><span class="spin"></span>Loading live dashboard metrics...</div></div>`;
@@ -1255,44 +1329,266 @@ function renderDashboardMetricsHtml(stats) {
   `;
 }
 
+function renderDashboardTripsSectionHtml(stats) {
+  if (!dashboardCtx.loaded) return '';
+  const activeTrips = stats?.activeTrips || [];
+  const upcomingTrips = stats?.upcomingTrips || [];
+
+  // Default active tab to 'today' if there are trips today, else 'upcoming'
+  if (!dashboardCtx.tripTab) {
+    dashboardCtx.tripTab = (activeTrips.length > 0) ? 'today' : 'upcoming';
+  }
+  const currentTab = dashboardCtx.tripTab;
+
+  let contentHtml = '';
+  if (currentTab === 'today') {
+    if (activeTrips.length === 0) {
+      contentHtml = `
+        <div class="empty" style="padding:32px 16px;text-align:center;">
+          <div style="font-size:32px;margin-bottom:8px;">🚌</div>
+          <div style="font-weight:600;font-size:15px;color:var(--ink);">No departures scheduled for today (${todayStr().split('-').reverse().join('/')})</div>
+          <div style="font-size:13px;color:var(--ink-soft);margin-top:4px;margin-bottom:16px;">
+            ${upcomingTrips.length > 0 ? `There are ${upcomingTrips.length} upcoming trip(s) open for booking.` : 'No upcoming trips planned yet.'}
+          </div>
+          <div style="display:flex;gap:10px;justify-content:center;">
+            ${upcomingTrips.length > 0 ? `<button class="btn btn-secondary btn-sm" data-dash-tab="upcoming">View Upcoming Trips (${upcomingTrips.length}) ➔</button>` : ''}
+            ${canManage() ? `<button class="btn btn-primary btn-sm" data-nav="#/admin/routes-trips">+ Schedule New Trip</button>` : ''}
+          </div>
+        </div>
+      `;
+    } else {
+      const rows = activeTrips.map((t) => {
+        const statusClass = t.status === 'Completed' ? 'pill-ok' : t.status === 'In-Transit' ? 'pill-saffron' : 'pill-info';
+        const occColor = t.occupancyPct >= 80 ? 'var(--maroon)' : t.occupancyPct >= 50 ? '#D98F2B' : 'var(--ok)';
+        return `
+          <tr>
+            <td>
+              <div style="font-weight:700;color:var(--ink);">${esc(t.route_name)}</div>
+              <div style="font-size:11.5px;color:var(--ink-soft);margin-top:2px;">🚌 ${esc(t.bus_name)}</div>
+            </td>
+            <td>
+              <div style="font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:13px;">${esc(t.time)}</div>
+              <span class="pill ${statusClass}" style="font-size:10.5px;padding:1px 6px;margin-top:2px;display:inline-block;">${esc(t.status)}</span>
+            </td>
+            <td>
+              <div style="display:flex;align-items:center;justify-content:space-between;font-size:12px;margin-bottom:4px;gap:8px;">
+                <span><b>${t.bookedCount}</b> / ${t.capacity} seats</span>
+                <b style="color:${occColor};">${t.occupancyPct}%</b>
+              </div>
+              <div style="background:#E2E8F0;height:6px;border-radius:3px;overflow:hidden;width:100px;">
+                <div style="background:${occColor};height:100%;width:${Math.min(100, t.occupancyPct)}%;"></div>
+              </div>
+            </td>
+            <td>
+              <div style="display:flex;align-items:center;justify-content:space-between;font-size:12px;margin-bottom:4px;gap:8px;">
+                <span><b>${t.boardedCount}</b> boarded</span>
+                <b style="color:var(--ok);">${t.boardedPct}%</b>
+              </div>
+              <div style="background:#E2E8F0;height:6px;border-radius:3px;overflow:hidden;width:100px;">
+                <div style="background:var(--ok);height:100%;width:${Math.min(100, t.boardedPct)}%;"></div>
+              </div>
+            </td>
+            <td>
+              ${t.dueAmt > 0
+                ? `<span style="color:var(--err);font-weight:700;font-size:12.5px;">${fmtMoney(t.dueAmt)} Due</span>`
+                : `<span style="color:var(--ok);font-size:12px;font-weight:600;">✓ Fully Paid</span>`}
+            </td>
+            <td>
+              <div style="display:flex;gap:6px;">
+                <button class="btn btn-primary btn-sm" data-direct-manifest="${t.id}|${t.date}" title="Directly open bus manifest &amp; seat map">📋 View Manifest</button>
+                ${canBook() ? `<button class="btn btn-secondary btn-sm" data-direct-book="${t.id}" title="Book seats on this bus">+ Book Seat</button>` : ''}
+              </div>
+            </td>
+          </tr>
+        `;
+      }).join('');
+
+      contentHtml = `
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Route &amp; Bus</th>
+                <th>Departure</th>
+                <th>Seat Occupancy</th>
+                <th>Boarding Progress</th>
+                <th>Trip Dues</th>
+                <th>Trip Actions</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      `;
+    }
+  } else {
+    // Upcoming trips tab
+    if (upcomingTrips.length === 0) {
+      contentHtml = `
+        <div class="empty" style="padding:32px 16px;text-align:center;">
+          <div style="font-size:32px;margin-bottom:8px;">🗓️</div>
+          <div style="font-weight:600;font-size:15px;color:var(--ink);">No upcoming trips scheduled yet</div>
+          <div style="font-size:13px;color:var(--ink-soft);margin-top:4px;margin-bottom:16px;">Add new departure dates to allow advance bookings.</div>
+          ${canManage() ? `<button class="btn btn-primary btn-sm" data-nav="#/admin/routes-trips">+ Schedule New Trip</button>` : ''}
+        </div>
+      `;
+    } else {
+      const cards = upcomingTrips.map((t) => {
+        let dayFormatted = t.date;
+        try {
+          dayFormatted = new Date(t.date + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
+        } catch {}
+
+        const isFull = t.availableSeats <= 0;
+        const availPill = isFull
+          ? `<span class="pill pill-off" style="font-size:11px;">Bus Full (0 Open)</span>`
+          : `<span class="pill pill-ok" style="font-size:11px;font-weight:700;">🟢 ${t.availableSeats} Seats Available</span>`;
+
+        return `
+          <div class="trip-card">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #F1ECE3;padding-bottom:8px;">
+              <div>
+                <div style="font-size:12px;font-family:'IBM Plex Mono',monospace;color:var(--maroon);font-weight:700;">
+                  📅 ${esc(dayFormatted)} · ⏰ ${esc(t.time)}
+                </div>
+                <div style="font-weight:700;font-size:15px;color:var(--ink);margin-top:4px;">
+                  ${esc(t.route_name || (t.source + ' ➔ ' + t.destination))}
+                </div>
+              </div>
+              <div style="text-align:right;">
+                <div style="font-family:'Spectral',serif;font-size:16px;font-weight:700;color:var(--maroon);">${fmtMoney(t.fare)}</div>
+                <div style="font-size:10.5px;color:var(--ink-soft);">per seat</div>
+              </div>
+            </div>
+
+            <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;">
+              <span style="color:var(--ink-soft);">🚌 <b>${esc(t.bus_name)}</b> (${t.capacity} seater)</span>
+              ${availPill}
+            </div>
+
+            <div style="background:#F1ECE3;height:5px;border-radius:3px;overflow:hidden;margin-top:2px;">
+              <div style="background:var(--maroon);height:100%;width:${Math.min(100, t.occupancyPct)}%;"></div>
+            </div>
+
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;padding-top:8px;border-top:1px dashed #F1ECE3;">
+              <span style="font-size:11px;color:var(--ink-soft);">${t.bookedCount} booked of ${t.capacity}</span>
+              <div style="display:flex;gap:6px;">
+                <button class="btn btn-secondary btn-sm" data-direct-manifest="${t.id}|${t.date}" style="font-size:11.5px;padding:3px 8px;" title="Directly open bus manifest &amp; seat map">📋 View Manifest</button>
+                ${canBook() && !isFull ? `<button class="btn btn-primary btn-sm" data-direct-book="${t.id}" style="font-size:11.5px;padding:3px 12px;font-weight:600;">+ Book This Trip</button>` : ''}
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      contentHtml = `<div class="trip-card-grid">${cards}</div>`;
+    }
+  }
+
+  return `
+    <div class="panel no-print" style="margin-top:20px;">
+      <div class="panel-head" style="margin-bottom:12px;border-bottom:none;padding-bottom:0;">
+        <div class="mode-toggle" style="margin-bottom:0;">
+          <button type="button" class="tabbtn ${currentTab === 'today' ? 'active' : ''}" data-dash-tab="today">
+            🚌 Today's Departures (${activeTrips.length})
+          </button>
+          <button type="button" class="tabbtn ${currentTab === 'upcoming' ? 'active' : ''}" data-dash-tab="upcoming">
+            🗓️ Upcoming Scheduled Trips (${upcomingTrips.length})
+          </button>
+        </div>
+        ${canManage() ? `<button class="btn btn-primary btn-sm" data-nav="#/admin/routes-trips">+ Schedule New Trip</button>` : ''}
+      </div>
+      ${contentHtml}
+    </div>
+  `;
+}
+
 function renderDashboardRecentHtml(stats) {
   if (!stats || !stats.recentBookings || stats.recentBookings.length === 0) {
-    return '';
+    return `
+      <div style="padding:28px 16px;text-align:center;color:var(--ink-soft);font-size:13.5px;background:#FAF8F5;border-radius:6px;border:1px dashed var(--line);">
+        No recent reservations recorded yet today.
+      </div>
+    `;
   }
-  const rows = stats.recentBookings.map((b) => {
+  const rows = stats.recentBookings.slice(0, 10).map((b) => {
     return `
       <tr>
-        <td><span class="pnr">${esc(b.pnr)}</span></td>
-        <td>${esc(b.route_name)}</td>
-        <td>${fmtDate(b.trip_date)}, ${esc(b.trip_time)}</td>
-        <td>${esc(b.bus_name)}</td>
-        <td><b>${b.seat_count}</b> seat(s)</td>
-        <td>${fmtMoney(b.total_amount)}</td>
-        <td>${paidPill(b.paid_status)}</td>
+        <td><span class="pnr" style="font-size:11.5px;">${esc(b.pnr)}</span></td>
         <td>
-          <button class="btn btn-secondary btn-sm" data-quick-ticket="${b.id}">Ticket</button>
-          ${(canManage() || roleIs('Supervisor') || b.booked_by_username === state.user.username)
-        ? `<button class="btn btn-danger btn-sm" data-quick-cancel="${b.id}" data-pnr="${esc(b.pnr)}">Cancel</button>`
-        : ''}
+          <div style="font-weight:700;font-size:13px;color:var(--ink);">${esc(b.route_name)}</div>
+          <div style="font-size:11.5px;color:var(--ink-soft);margin-top:1px;">🚌 ${esc(b.bus_name || 'Seva Bus')}</div>
+        </td>
+        <td>
+          <div style="font-size:12px;font-weight:600;color:var(--ink);">${fmtDate(b.trip_date)}</div>
+          <div style="font-size:11.5px;color:var(--ink-soft);font-family:'IBM Plex Mono',monospace;">${esc(b.trip_time)}</div>
+        </td>
+        <td><b>${b.seat_count}</b> seat(s)</td>
+        <td>
+          <div style="font-weight:700;font-size:13px;">${fmtMoney(b.total_amount)}</div>
+          <div style="margin-top:2px;">${paidPill(b.paid_status)}</div>
+        </td>
+        <td>
+          <div style="display:flex;gap:5px;flex-wrap:nowrap;">
+            <button class="btn btn-secondary btn-sm" data-quick-ticket="${b.id}" style="padding:4px 8px;font-size:11.5px;" title="View &amp; print boarding pass">Pass</button>
+            <button class="btn btn-secondary btn-sm" data-quick-wa="${b.id}" style="padding:4px 8px;font-size:11.5px;" title="Send ticket link via WhatsApp">📱 WA</button>
+            ${(canManage() || roleIs('Supervisor') || b.booked_by_username === state.user.username)
+          ? `<button class="btn btn-danger btn-sm" data-quick-cancel="${b.id}" data-pnr="${esc(b.pnr)}" style="padding:4px 7px;font-size:11.5px;" title="Cancel booking">✕</button>`
+          : ''}
+          </div>
         </td>
       </tr>
     `;
   }).join('');
 
   return `
-    <div class="panel no-print" style="margin-top:20px;">
-      <div class="panel-head">
-        <h3>Recent Bookings</h3>
-        <button class="btn btn-secondary btn-sm" data-nav="#/search">Search All Bookings</button>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>PNR</th><th>Route</th><th>Departure</th><th>Bus</th><th>Seats</th><th>Total</th><th>Status</th><th>Actions</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>PNR</th>
+            <th>Route &amp; Bus</th>
+            <th>Departure</th>
+            <th>Seats</th>
+            <th>Total &amp; Status</th>
+            <th>Quick Actions</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
     </div>
   `;
+}
+
+function attachDashboardTripsActions(container = document) {
+  container.querySelectorAll('[data-nav]').forEach((el) => {
+    el.onclick = () => nav(el.getAttribute('data-nav'));
+  });
+
+  container.querySelectorAll('[data-dash-tab]').forEach((btn) => {
+    btn.onclick = () => {
+      dashboardCtx.tripTab = btn.getAttribute('data-dash-tab');
+      const tWrap = document.getElementById('dashTripsWrap');
+      if (tWrap) {
+        tWrap.innerHTML = renderDashboardTripsSectionHtml(dashboardCtx.stats);
+        attachDashboardTripsActions(tWrap);
+      }
+    };
+  });
+
+  container.querySelectorAll('[data-direct-manifest]').forEach((btn) => {
+    btn.onclick = () => {
+      const [tripId, tripDate] = btn.getAttribute('data-direct-manifest').split('|');
+      openTripManifestDirectly(tripId, tripDate);
+    };
+  });
+
+  container.querySelectorAll('[data-direct-book]').forEach((btn) => {
+    btn.onclick = () => {
+      const tripId = btn.getAttribute('data-direct-book');
+      openTripBookingDirectly(tripId);
+    };
+  });
 }
 
 function attachDashboardRecentActions(container = document) {
@@ -1322,6 +1618,28 @@ function attachDashboardRecentActions(container = document) {
     };
   });
 
+  container.querySelectorAll('[data-quick-wa]').forEach((btn) => {
+    btn.onclick = async () => {
+      const bId = btn.getAttribute('data-quick-wa');
+      btn.disabled = true;
+      try {
+        const b = await api('/bookings/' + bId);
+        if (b) {
+          shareTicketWhatsapp(b, {
+            route_name: b.route_name,
+            bus_name: b.bus_name,
+            date: b.trip_date,
+            time: b.trip_time,
+          });
+        }
+      } catch (e) {
+        toast(e.message, true);
+      } finally {
+        btn.disabled = false;
+      }
+    };
+  });
+
   container.querySelectorAll('[data-quick-cancel]').forEach((btn) => {
     btn.onclick = () => {
       const bId = btn.getAttribute('data-quick-cancel');
@@ -1335,8 +1653,15 @@ function attachDashboardRecentActions(container = document) {
 }
 
 function updateDashboardInPlace() {
+  const aWrap = document.getElementById('dashAlertsWrap');
+  if (aWrap) aWrap.innerHTML = renderDashboardAlertsHtml(dashboardCtx.stats);
   const mWrap = document.getElementById('dashMetricsWrap');
   if (mWrap) mWrap.innerHTML = renderDashboardMetricsHtml(dashboardCtx.stats);
+  const tWrap = document.getElementById('dashTripsWrap');
+  if (tWrap) {
+    tWrap.innerHTML = renderDashboardTripsSectionHtml(dashboardCtx.stats);
+    attachDashboardTripsActions(tWrap);
+  }
   const rWrap = document.getElementById('dashRecentWrap');
   if (rWrap) {
     rWrap.innerHTML = renderDashboardRecentHtml(dashboardCtx.stats);
@@ -1348,37 +1673,41 @@ function dashboardView() {
   const stats = dashboardCtx.stats;
 
   return `
-  <div class="panel-head no-print" style="margin-bottom:12px;">
+  <div class="panel-head no-print" style="margin-bottom:16px;">
     <div>
-      <h1 class="page-title no-print" style="margin-bottom:2px;">Welcome, ${esc(state.user.name)}</h1>
-      <p class="page-sub no-print" style="margin-bottom:0;">${todayStr().split('-').reverse().join('/')} · Role: <b>${esc(state.user.role)}</b></p>
+      <div style="display:inline-flex;align-items:center;gap:6px;background:#F0FDF4;border:1px solid #BBF7D0;color:#166534;font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:12px;margin-bottom:4px;">
+        <span style="width:7px;height:7px;border-radius:50%;background:#16A34A;display:inline-block;"></span> Live Dispatch Desk
+      </div>
+      <h1 class="page-title no-print" style="margin-bottom:2px;font-size:22px;">Welcome, ${esc(state.user.name)}</h1>
+      <p class="page-sub no-print" style="margin-bottom:0;font-size:12.5px;">${todayStr().split('-').reverse().join('/')} · Role: <b>${esc(state.user.role)}</b></p>
     </div>
     <div style="display:flex;gap:8px;">
-      <button class="btn btn-secondary btn-sm" id="refreshDashBtn">Refresh Metrics</button>
-      ${canManage() ? `<button class="btn btn-secondary btn-sm" id="dashBackupBtn">Backup DB</button>` : ''}
+      <button class="btn btn-secondary btn-sm" id="refreshDashBtn">🔄 Refresh Dashboard</button>
     </div>
   </div>
+
+  <div class="no-print" id="dashAlertsWrap">${renderDashboardAlertsHtml(stats)}</div>
 
   <div class="no-print" id="dashMetricsWrap">${renderDashboardMetricsHtml(stats)}</div>
 
-  <div class="panel no-print" style="margin-bottom:24px;">
-    <div class="panel-head"><h3>Passenger &amp; PNR Quick Lookup</h3></div>
-    <div class="formrow">
-      <input id="dashSearchInput" placeholder="Enter PNR, 10-digit mobile number, or passenger name..." style="flex:1;">
-      <button class="btn btn-primary" id="dashSearchBtn">Quick Search</button>
+  <div class="no-print" id="dashTripsWrap">${renderDashboardTripsSectionHtml(stats)}</div>
+
+  <!-- Passenger Lookup & Recent Bookings (Full-Width Clean Dispatch Desk) -->
+  <div class="panel no-print" style="margin-top:20px;">
+    <div class="panel-head" style="margin-bottom:12px;padding-bottom:10px;">
+      <div>
+        <h3 style="margin-bottom:2px;border:none;padding:0;font-size:15px;">🔍 Passenger Lookup &amp; Recent Bookings</h3>
+        <div style="font-size:11.5px;color:var(--ink-soft);">Search reservations by PNR, mobile number, or passenger name</div>
+      </div>
     </div>
-  </div>
 
-  <div class="cardgrid no-print">
-    ${canBook() ? `<div class="tile"><h3>Create Booking</h3><p>Book single or group seats with fare &amp; payment status.</p><button class="btn btn-primary" data-nav="#/booking">Create Booking</button></div>` : ''}
-    <div class="tile"><h3>View Manifest</h3><p>Seat map with live details, passenger list, CSV export &amp; print.</p><button class="btn btn-primary" data-nav="#/manifest">View Manifest</button></div>
-    <div class="tile"><h3>Search Bookings</h3><p>Global lookup by PNR, passenger phone, or name.</p><button class="btn btn-secondary" data-nav="#/search">Search</button></div>
-    ${canManage() ? `<div class="tile"><h3>Manage Buses &amp; Layouts</h3><p>Define buses and custom seat layouts.</p><button class="btn btn-secondary" data-nav="#/admin/buses">Manage Buses</button></div>` : ''}
-    ${canManage() ? `<div class="tile"><h3>Manage Routes &amp; Trips</h3><p>Schedule trips, start in-transit, complete, or cancel.</p><button class="btn btn-secondary" data-nav="#/admin/routes-trips">Manage Routes &amp; Trips</button></div>` : ''}
-    ${canManage() ? `<div class="tile"><h3>Manage Users</h3><p>Create Admin, Agent, or Supervisor accounts from the panel.</p><button class="btn btn-secondary" data-nav="#/admin/users">Manage Users</button></div>` : ''}
-  </div>
+    <div style="display:flex;gap:8px;margin-bottom:14px;max-width:640px;">
+      <input id="dashSearchInput" placeholder="Enter PNR, 10-digit mobile, or passenger name..." style="flex:1;padding:9px 13px;font-size:13.5px;">
+      <button class="btn btn-primary" id="dashSearchBtn" style="padding:9px 18px;font-size:13.5px;white-space:nowrap;">Search Booking</button>
+    </div>
 
-  <div id="dashRecentWrap">${renderDashboardRecentHtml(stats)}</div>
+    <div id="dashRecentWrap">${renderDashboardRecentHtml(stats)}</div>
+  </div>
   `;
 }
 
@@ -1410,17 +1739,6 @@ async function attachDashboard() {
     finally { rfBtn.disabled = false; }
   };
 
-  const backupBtn = document.getElementById('dashBackupBtn');
-  if (backupBtn) backupBtn.onclick = async () => {
-    backupBtn.disabled = true;
-    backupBtn.textContent = 'Backing up...';
-    try {
-      const res = await api('/admin/backup', { method: 'POST' });
-      toast(`Backup saved: ${res.backup.fileName}`);
-    } catch (e) { toast(e.message); }
-    finally { backupBtn.disabled = false; backupBtn.textContent = 'Backup DB'; }
-  };
-
   const doDashSearch = () => {
     const q = document.getElementById('dashSearchInput').value.trim();
     if (!q) { toast('Please enter a PNR, phone number, or name'); return; }
@@ -1434,6 +1752,7 @@ async function attachDashboard() {
   const dsi = document.getElementById('dashSearchInput');
   if (dsi) dsi.addEventListener('keydown', (e) => { if (e.key === 'Enter') doDashSearch(); });
 
+  attachDashboardTripsActions(document);
   attachDashboardRecentActions(document);
 }
 
@@ -1479,7 +1798,7 @@ function searchView() {
           time: b.trip_time,
           status: b.trip_status,
         };
-        const seats = b.seats || [];
+        const seats = sortSeatsSerially(b.seats || []);
         const bal = Math.max(0, Number(b.total_amount || 0) - Number(b.amount_paid || 0));
         const rows = seats.map((s) => `
           <tr>
@@ -2224,6 +2543,7 @@ function attachBookingStep2() {
       if (i >= 0) {
         // Deselect seat instantly (0ms)
         bookingCtx.selected.splice(i, 1);
+        bookingCtx.selected = sortSeatsSerially(bookingCtx.selected);
         delete bookingCtx.pax[lab];
         el.classList.remove('seat-sel');
         el.classList.add('seat-avail');
@@ -2235,8 +2555,9 @@ function attachBookingStep2() {
       } else {
         // Select seat instantly (Optimistic UI - 0ms delay)
         bookingCtx.selected.push(lab);
+        bookingCtx.selected = sortSeatsSerially(bookingCtx.selected);
         if (window._returnPaxStash && window._returnPaxStash.length) {
-          const nextPax = window._returnPaxStash[bookingCtx.selected.length - 1];
+          const nextPax = window._returnPaxStash[bookingCtx.selected.indexOf(lab)];
           if (nextPax) {
             bookingCtx.pax[lab] = { ...nextPax };
           }
@@ -2250,14 +2571,17 @@ function attachBookingStep2() {
           method: 'POST',
           body: JSON.stringify({ seatLabel: lab, sessionId: mySession })
         }).catch((err) => {
-          // Revert if lock failed on server (e.g. seat was already taken)
-          const idx = bookingCtx.selected.indexOf(lab);
-          if (idx >= 0) bookingCtx.selected.splice(idx, 1);
-          delete bookingCtx.pax[lab];
-          el.classList.remove('seat-sel');
-          el.classList.add('seat-avail');
-          refreshForms();
-          toast(err.message || 'Seat is currently unavailable.', true);
+          // Revert only if still selected
+          if (bookingCtx.selected.includes(lab)) {
+            const idx = bookingCtx.selected.indexOf(lab);
+            if (idx >= 0) bookingCtx.selected.splice(idx, 1);
+            bookingCtx.selected = sortSeatsSerially(bookingCtx.selected);
+            delete bookingCtx.pax[lab];
+            el.classList.remove('seat-sel');
+            el.classList.add('seat-avail');
+            refreshForms();
+            toast(err.message || 'Seat is currently unavailable.', true);
+          }
         });
       }
     };
@@ -2295,6 +2619,7 @@ function attachBookingStep2() {
 function showErr(msg) { const el = document.getElementById('bookingErr'); if (el) { el.textContent = msg; el.classList.remove('hidden'); } }
 
 async function confirmBooking() {
+  bookingCtx.selected = sortSeatsSerially(bookingCtx.selected);
   const errEl = document.getElementById('bookingErr');
   errEl.classList.add('hidden');
   if (bookingCtx.selected.length === 0) return showErr('Please select at least one seat.');
@@ -2527,7 +2852,7 @@ function renderManifestBody({ trip, seatData, bookings }) {
 
   function bookingRowsHtml(items, startSr) {
     let sr = startSr;
-    return items.flatMap((b) => b.seats.map((s) => {
+    return items.flatMap((b) => sortSeatsSerially(b.seats).map((s) => {
       sr += 1;
       const bal = Math.max(0, Number(b.total_amount || 0) - Number(b.amount_paid || 0));
       const canCancelThis = canManage() || roleIs('Supervisor') || b.booked_by_username === state.user.username;
@@ -5430,7 +5755,7 @@ function openConcessionFormModal(item, onDone) {
       const { user } = await api('/me');
       state.user = user;
       resetInactivityTimer();
-      await loadCaches();
+      loadCaches();
       const initialRoute = window.location.hash || '#/dashboard';
       nav(initialRoute, false);
       return;
