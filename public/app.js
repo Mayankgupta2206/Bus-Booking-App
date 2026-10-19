@@ -348,9 +348,13 @@ function attachLogin() {
       const data = await api('/auth/login', { method: 'POST', body: JSON.stringify({ username: u, password: p }) });
       setToken(data.token);
       state.user = data.user;
+      if (data.stats) {
+        dashboardCtx.stats = data.stats;
+        dashboardCtx.loaded = true;
+      }
       resetInactivityTimer();
-      loadCaches();
       nav('#/dashboard');
+      setTimeout(loadCaches, 150);
     } catch (e) {
       errEl.textContent = e.message || 'Invalid username or password.';
       errEl.classList.remove('hidden');
@@ -360,6 +364,7 @@ function attachLogin() {
   };
   document.getElementById('loginBtn').onclick = doLogin;
   document.getElementById('lp').addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
+  document.getElementById('lu').addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
 }
 
 /* ---------- Shell ---------- */

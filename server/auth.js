@@ -12,23 +12,39 @@ function signToken(user) {
   );
 }
 
+const userCache = new Map();
+
+function clearUserCache(userId) {
+  if (userId) userCache.delete(userId);
+  else userCache.clear();
+}
+
 function requireAuth(req, res, next) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : (req.query?.token || null);
   if (!token) return res.status(401).json({ error: 'Not authenticated.' });
   try {
     const payload = jwt.verify(token, SECRET);
-    const dbUser = db.prepare('SELECT id, username, name, role, permissions FROM users WHERE id = ?').get(payload.id);
-    if (!dbUser) {
-      return res.status(401).json({ error: 'User account not found or removed.' });
+    const now = Date.now();
+    let cached = userCache.get(payload.id);
+    if (!cached || cached.expiresAt < now) {
+      const dbUser = db.prepare('SELECT id, username, name, role, permissions FROM users WHERE id = ?').get(payload.id);
+      if (!dbUser) {
+        return res.status(401).json({ error: 'User account not found or removed.' });
+      }
+      cached = {
+        user: {
+          id: dbUser.id,
+          username: dbUser.username,
+          name: dbUser.name,
+          role: dbUser.role,
+          permissions: parseUserPermissions(dbUser)
+        },
+        expiresAt: now + 30000 // 30 seconds
+      };
+      userCache.set(payload.id, cached);
     }
-    req.user = {
-      id: dbUser.id,
-      username: dbUser.username,
-      name: dbUser.name,
-      role: dbUser.role,
-      permissions: parseUserPermissions(dbUser)
-    };
+    req.user = cached.user;
     next();
   } catch {
     return res.status(401).json({ error: 'Session expired. Please log in again.' });
@@ -68,6 +84,7 @@ function requireAdminOrSupervisor(req, res, next) {
 module.exports = {
   signToken,
   requireAuth,
+  clearUserCache,
   requireAdmin,
   requirePerm,
   requireAgentOrAdmin,

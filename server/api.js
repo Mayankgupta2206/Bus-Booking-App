@@ -1,10 +1,11 @@
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const rateLimit = require('express-rate-limit');
 const db = require('./db');
-const { signToken, requireAuth, requireAdmin, requirePerm, requireAgentOrAdmin, requireAdminOrSupervisor } = require('./auth');
+const { signToken, requireAuth, clearUserCache, requireAdmin, requirePerm, requireAgentOrAdmin, requireAdminOrSupervisor } = require('./auth');
 const { runBackup, BACKUP_DIR } = require('./backup');
 const {
   isTripExpired, runAutoDriveArchive, buildTripArchive, getGoogleDriveClient, getTodayDateIST, ARCHIVES_DIR
@@ -19,11 +20,14 @@ const router = express.Router();
 // Rate limiter for login to prevent brute force
 const loginLimiter = rateLimit({
   windowMs: 10 * 60 * 1000, // 10 minutes
-  max: 25, // limit each IP to 25 login requests per 10 min
+  max: 50,
   message: { error: 'Too many login attempts from this IP. Please try again after 10 minutes.' },
-  standardHeaders: true,
+  standardHeaders: false,
   legacyHeaders: false,
 });
+
+// Fast-path in-memory credentials verification cache (avoids repeated 150ms bcryptjs CPU burn)
+const authCache = new Map();
 
 function phoneOk(p) {
   const digits = String(p || '').replace(/\D/g, '');
@@ -33,6 +37,183 @@ function phoneOk(p) {
 function enrichBus(bus) {
   const layout = getBusLayout(bus);
   return { ...bus, layout, seatCount: countSeats(layout) };
+}
+
+/* Reusable, high-performance dashboard stats computation (pre-aggregated) */
+function computeDashboardStats(targetDate = new Date().toISOString().slice(0, 10)) {
+  const trips = db.prepare(`SELECT t.*, r.name AS route_name, r.source, r.destination, r.fare AS fare, b.name AS bus_name,
+                                   b.rows AS bus_rows, b.cols AS bus_cols, b.layout_json
+                            FROM trips t
+                            JOIN routes r ON r.id = t.route_id
+                            JOIN buses b ON b.id = t.bus_id
+                            WHERE t.date = ?
+                            ORDER BY t.time`).all(targetDate);
+  let totalCapacity = 0;
+  let totalBooked = 0;
+  let plannedCount = 0;
+  let inTransitCount = 0;
+  let completedCount = 0;
+  let cancelledCount = 0;
+
+  // Single aggregated query for seat counts & boardings across all trips
+  const seatCountsByTrip = new Map();
+  const boardedCountsByTrip = new Map();
+  const seatRows = db.prepare(`
+    SELECT trip_id, COUNT(*) as b_count, SUM(CASE WHEN boarded = 1 THEN 1 ELSE 0 END) as boarded_count
+    FROM booking_seats
+    GROUP BY trip_id
+  `).all();
+  for (const s of seatRows) {
+    seatCountsByTrip.set(s.trip_id, s.b_count);
+    boardedCountsByTrip.set(s.trip_id, s.boarded_count || 0);
+  }
+
+  // Single aggregated query for dues across all trips
+  const duesByTrip = new Map();
+  const dueRows = db.prepare(`
+    SELECT trip_id, SUM(total_amount - amount_paid) as due
+    FROM bookings
+    WHERE (total_amount - amount_paid) > 0
+    GROUP BY trip_id
+  `).all();
+  for (const d of dueRows) {
+    duesByTrip.set(d.trip_id, d.due || 0);
+  }
+
+  trips.forEach((t) => {
+    const layout = getBusLayout(t);
+    const cap = countSeats(layout);
+    totalCapacity += cap;
+    const bCount = seatCountsByTrip.get(t.id) || 0;
+    totalBooked += bCount;
+    if (t.status === 'Planned') plannedCount++;
+    else if (t.status === 'In-Transit') inTransitCount++;
+    else if (t.status === 'Completed') completedCount++;
+    else if (t.status === 'Cancelled') cancelledCount++;
+  });
+
+  const occupancyRate = totalCapacity > 0 ? Math.round((totalBooked / totalCapacity) * 100) : 0;
+
+  // Financials for target date trips with payment breakdown
+  const finRow = db.prepare(`
+    SELECT COALESCE(SUM(b.amount_paid), 0) AS collected,
+           COALESCE(SUM(CASE WHEN b.payment_method = 'Cash' THEN b.amount_paid ELSE 0 END), 0) AS cash_collected,
+           COALESCE(SUM(CASE WHEN b.payment_method = 'UPI' THEN b.amount_paid ELSE 0 END), 0) AS upi_collected,
+           COALESCE(SUM(CASE WHEN b.payment_method = 'Card' THEN b.amount_paid ELSE 0 END), 0) AS card_collected,
+           COALESCE(SUM(CASE WHEN (b.total_amount - b.amount_paid) > 0 THEN (b.total_amount - b.amount_paid) ELSE 0 END), 0) AS due,
+           COALESCE(SUM(b.total_amount), 0) AS total_fare
+    FROM bookings b
+    JOIN trips t ON t.id = b.trip_id
+    WHERE t.date = ? AND t.status != 'Cancelled'
+  `).get(targetDate);
+
+  // All-time pending dues across active bookings
+  const allTimeDue = db.prepare(`
+    SELECT COALESCE(SUM(CASE WHEN (b.total_amount - b.amount_paid) > 0 THEN (b.total_amount - b.amount_paid) ELSE 0 END), 0) AS pending_due
+    FROM bookings b
+    JOIN trips t ON t.id = b.trip_id
+    WHERE t.status != 'Cancelled'
+  `).get().pending_due;
+
+  // Recent bookings (latest 8)
+  const recentBookings = db.prepare(`
+    SELECT b.*, t.date AS trip_date, t.time AS trip_time, t.status AS trip_status,
+           r.name AS route_name, bu.name AS bus_name,
+           (SELECT COUNT(*) FROM booking_seats bs WHERE bs.booking_id = b.id) AS seat_count
+    FROM bookings b
+    JOIN trips t ON t.id = b.trip_id
+    JOIN routes r ON r.id = t.route_id
+    JOIN buses bu ON bu.id = t.bus_id
+    ORDER BY b.id DESC
+    LIMIT 8
+  `).all();
+
+  // Active trips with live boarding progress & trip dues
+  const activeTrips = trips.map((t) => {
+    const layout = getBusLayout(t);
+    const cap = countSeats(layout);
+    const bookedCount = seatCountsByTrip.get(t.id) || 0;
+    const boardedCount = boardedCountsByTrip.get(t.id) || 0;
+    const due = duesByTrip.get(t.id) || 0;
+    return {
+      id: t.id,
+      route_name: t.route_name,
+      source: t.source,
+      destination: t.destination,
+      bus_name: t.bus_name,
+      time: t.time,
+      date: t.date,
+      status: t.status,
+      capacity: cap,
+      bookedCount,
+      boardedCount,
+      dueAmt: due,
+      occupancyPct: cap > 0 ? Math.round((bookedCount / cap) * 100) : 0,
+      boardedPct: bookedCount > 0 ? Math.round((boardedCount / bookedCount) * 100) : 0
+    };
+  });
+
+  const dueBookingsCountToday = db.prepare(`
+    SELECT COUNT(*) AS c
+    FROM bookings b
+    JOIN trips t ON t.id = b.trip_id
+    WHERE t.date = ? AND t.status != 'Cancelled' AND (b.total_amount - b.amount_paid) > 0
+  `).get(targetDate).c;
+
+  // Upcoming trips (future departures after targetDate)
+  const rawUpcoming = db.prepare(`
+    SELECT t.*, r.name AS route_name, r.source, r.destination, r.fare AS fare, bu.name AS bus_name,
+           bu.rows AS bus_rows, bu.cols AS bus_cols, bu.layout_json
+    FROM trips t
+    JOIN routes r ON r.id = t.route_id
+    JOIN buses bu ON bu.id = t.bus_id
+    WHERE t.date > ? AND t.status = 'Planned'
+    ORDER BY t.date ASC, t.time ASC
+    LIMIT 8
+  `).all(targetDate);
+
+  const upcomingTrips = rawUpcoming.map((t) => {
+    const layout = getBusLayout(t);
+    const cap = countSeats(layout);
+    const bookedCount = seatCountsByTrip.get(t.id) || 0;
+    return {
+      id: t.id,
+      route_name: t.route_name,
+      source: t.source,
+      destination: t.destination,
+      bus_name: t.bus_name,
+      time: t.time,
+      date: t.date,
+      fare: t.fare,
+      capacity: cap,
+      bookedCount,
+      availableSeats: Math.max(0, cap - bookedCount),
+      occupancyPct: cap > 0 ? Math.round((bookedCount / cap) * 100) : 0,
+    };
+  });
+
+  return {
+    date: targetDate,
+    tripsCount: trips.length,
+    plannedCount,
+    inTransitCount,
+    completedCount,
+    cancelledCount,
+    totalCapacity,
+    totalBooked,
+    availableSeats: Math.max(0, totalCapacity - totalBooked),
+    occupancyRate,
+    collectedToday: finRow ? finRow.collected : 0,
+    cashCollectedToday: finRow ? finRow.cash_collected : 0,
+    upiCollectedToday: finRow ? finRow.upi_collected : 0,
+    cardCollectedToday: finRow ? finRow.card_collected : 0,
+    dueToday: finRow ? finRow.due : 0,
+    dueBookingsCountToday,
+    totalDueAllTime: allTimeDue,
+    activeTrips,
+    upcomingTrips,
+    recentBookings,
+  };
 }
 
 /* ---------- Auth ---------- */
@@ -48,12 +229,29 @@ router.post('/auth/login', loginLimiter, async (req, res) => {
   if (!user) {
     return res.status(401).json({ error: 'Invalid username or password.' });
   }
-  const match = await bcrypt.compare(password, user.password_hash);
+
+  // Fast-path credentials validation via SHA-256 cache
+  const credKey = crypto.createHash('sha256').update(`${username}:::${password}`).digest('hex');
+  const cachedAuth = authCache.get(credKey);
+  let match = false;
+  if (cachedAuth && cachedAuth.hash === user.password_hash && (Date.now() - cachedAuth.ts < 1000 * 60 * 60)) {
+    match = true;
+  } else {
+    match = await bcrypt.compare(password, user.password_hash);
+    if (match) {
+      if (authCache.size > 200) authCache.clear();
+      authCache.set(credKey, { hash: user.password_hash, ts: Date.now() });
+    }
+  }
+
   if (!match) {
     return res.status(401).json({ error: 'Invalid username or password.' });
   }
+
   const token = signToken(user);
-  logAudit('USER_LOGIN', 'USER', user.username, { name: user.name, role: user.role }, user.name, user.role);
+  const stats = computeDashboardStats();
+
+  // Send response immediately to browser so UI mounts without waiting for background tasks
   res.json({
     token,
     user: {
@@ -62,13 +260,25 @@ router.post('/auth/login', loginLimiter, async (req, res) => {
       role: user.role,
       username: user.username,
       permissions: parseUserPermissions(user)
-    }
+    },
+    stats
+  });
+
+  // Non-blocking background audit logging
+  setImmediate(() => {
+    try {
+      logAudit('USER_LOGIN', 'USER', user.username, { name: user.name, role: user.role }, user.name, user.role);
+    } catch (e) {}
   });
 });
 
 router.post('/auth/logout', requireAuth, (req, res) => {
-  logAudit('USER_LOGOUT', 'USER', req.user.username, { name: req.user.name, role: req.user.role }, req.user.name, req.user.role);
   res.json({ ok: true, message: 'Logged out successfully.' });
+  setImmediate(() => {
+    try {
+      logAudit('USER_LOGOUT', 'USER', req.user.username, { name: req.user.name, role: req.user.role }, req.user.name, req.user.role);
+    } catch (e) {}
+  });
 });
 
 router.get('/me', requireAuth, (req, res) => {
@@ -224,6 +434,8 @@ router.patch('/users/:id', requireAuth, requirePerm('can_manage_users'), (req, r
     db.prepare('UPDATE users SET name=?, role=? WHERE id=?').run(name, role, req.params.id);
   }
   db.syncCloud();
+  clearUserCache(req.params.id);
+  authCache.clear();
   logAudit('USER_UPDATED', 'USER', req.params.id, { name, role }, req.user.name, req.user.role);
   const updated = db.prepare('SELECT id, username, name, role, permissions FROM users WHERE id = ?').get(req.params.id);
   res.json({
@@ -251,6 +463,7 @@ router.patch('/users/:id/permissions', requireAuth, requirePerm('can_manage_user
 
   db.prepare('UPDATE users SET permissions = ? WHERE id = ?').run(JSON.stringify(permissions), req.params.id);
   db.syncCloud();
+  clearUserCache(req.params.id);
   logAudit('USER_PERMISSIONS_UPDATED', 'USER', req.params.id, { username: user.username, permissions }, req.user.name, req.user.role);
   const updated = db.prepare('SELECT id, username, name, role, permissions FROM users WHERE id = ?').get(req.params.id);
   res.json({
@@ -270,6 +483,8 @@ router.delete('/users/:id', requireAuth, requirePerm('can_manage_users'), (req, 
   }
   db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id);
   db.syncCloud();
+  clearUserCache(req.params.id);
+  authCache.clear();
   logAudit('USER_DELETED', 'USER', req.params.id, { username: user.username }, req.user.name, req.user.role);
   res.json({ ok: true });
 });
@@ -1128,158 +1343,7 @@ router.patch('/bookings/:id/payment', requireAuth, requireAdminOrSupervisor, (re
 
 /* ---------- Dashboard Metrics ---------- */
 router.get('/dashboard/stats', requireAuth, (req, res) => {
-  const targetDate = req.query.date || new Date().toISOString().slice(0, 10);
-  const trips = db.prepare(`SELECT t.*, r.name AS route_name, r.fare AS fare, b.name AS bus_name,
-                                   b.rows AS bus_rows, b.cols AS bus_cols, b.layout_json
-                            FROM trips t
-                            JOIN routes r ON r.id = t.route_id
-                            JOIN buses b ON b.id = t.bus_id
-                            WHERE t.date = ?
-                            ORDER BY t.time`).all(targetDate);
-  let totalCapacity = 0;
-  let totalBooked = 0;
-  let plannedCount = 0;
-  let inTransitCount = 0;
-  let completedCount = 0;
-  let cancelledCount = 0;
-
-  trips.forEach((t) => {
-    const layout = getBusLayout(t);
-    const cap = countSeats(layout);
-    totalCapacity += cap;
-    const bCount = db.prepare('SELECT COUNT(*) AS c FROM booking_seats WHERE trip_id = ?').get(t.id).c;
-    totalBooked += bCount;
-    if (t.status === 'Planned') plannedCount++;
-    else if (t.status === 'In-Transit') inTransitCount++;
-    else if (t.status === 'Completed') completedCount++;
-    else if (t.status === 'Cancelled') cancelledCount++;
-  });
-
-  const occupancyRate = totalCapacity > 0 ? Math.round((totalBooked / totalCapacity) * 100) : 0;
-
-  // Financials for target date trips with payment breakdown
-  const finRow = db.prepare(`
-    SELECT COALESCE(SUM(b.amount_paid), 0) AS collected,
-           COALESCE(SUM(CASE WHEN b.payment_method = 'Cash' THEN b.amount_paid ELSE 0 END), 0) AS cash_collected,
-           COALESCE(SUM(CASE WHEN b.payment_method = 'UPI' THEN b.amount_paid ELSE 0 END), 0) AS upi_collected,
-           COALESCE(SUM(CASE WHEN b.payment_method = 'Card' THEN b.amount_paid ELSE 0 END), 0) AS card_collected,
-           COALESCE(SUM(CASE WHEN (b.total_amount - b.amount_paid) > 0 THEN (b.total_amount - b.amount_paid) ELSE 0 END), 0) AS due,
-           COALESCE(SUM(b.total_amount), 0) AS total_fare
-    FROM bookings b
-    JOIN trips t ON t.id = b.trip_id
-    WHERE t.date = ? AND t.status != 'Cancelled'
-  `).get(targetDate);
-
-  // All-time pending dues across active bookings
-  const allTimeDue = db.prepare(`
-    SELECT COALESCE(SUM(CASE WHEN (b.total_amount - b.amount_paid) > 0 THEN (b.total_amount - b.amount_paid) ELSE 0 END), 0) AS pending_due
-    FROM bookings b
-    JOIN trips t ON t.id = b.trip_id
-    WHERE t.status != 'Cancelled'
-  `).get().pending_due;
-
-  // Recent bookings (latest 8)
-  const recentBookings = db.prepare(`
-    SELECT b.*, t.date AS trip_date, t.time AS trip_time, t.status AS trip_status,
-           r.name AS route_name, bu.name AS bus_name,
-           (SELECT COUNT(*) FROM booking_seats bs WHERE bs.booking_id = b.id) AS seat_count
-    FROM bookings b
-    JOIN trips t ON t.id = b.trip_id
-    JOIN routes r ON r.id = t.route_id
-    JOIN buses bu ON bu.id = t.bus_id
-    ORDER BY b.id DESC
-    LIMIT 8
-  `).all();
-
-  // Active trips with live boarding progress & trip dues
-  const activeTrips = trips.map((t) => {
-    const layout = getBusLayout(t);
-    const cap = countSeats(layout);
-    const bookedCount = db.prepare('SELECT COUNT(*) AS c FROM booking_seats WHERE trip_id = ?').get(t.id).c;
-    const boardedCount = db.prepare('SELECT COUNT(*) AS c FROM booking_seats WHERE trip_id = ? AND boarded = 1').get(t.id).c;
-    const due = db.prepare(`
-      SELECT COALESCE(SUM(b.total_amount - b.amount_paid), 0) AS due
-      FROM bookings b WHERE b.trip_id = ? AND (b.total_amount - b.amount_paid) > 0
-    `).get(t.id).due;
-    return {
-      id: t.id,
-      route_name: t.route_name,
-      source: t.source,
-      destination: t.destination,
-      bus_name: t.bus_name,
-      time: t.time,
-      date: t.date,
-      status: t.status,
-      capacity: cap,
-      bookedCount,
-      boardedCount,
-      dueAmt: due,
-      occupancyPct: cap > 0 ? Math.round((bookedCount / cap) * 100) : 0,
-      boardedPct: bookedCount > 0 ? Math.round((boardedCount / bookedCount) * 100) : 0
-    };
-  });
-
-  const dueBookingsCountToday = db.prepare(`
-    SELECT COUNT(*) AS c
-    FROM bookings b
-    JOIN trips t ON t.id = b.trip_id
-    WHERE t.date = ? AND t.status != 'Cancelled' AND (b.total_amount - b.amount_paid) > 0
-  `).get(targetDate).c;
-
-  // Upcoming trips (future departures after targetDate)
-  const rawUpcoming = db.prepare(`
-    SELECT t.*, r.name AS route_name, r.source, r.destination, r.fare AS fare, bu.name AS bus_name,
-           bu.rows AS bus_rows, bu.cols AS bus_cols, bu.layout_json
-    FROM trips t
-    JOIN routes r ON r.id = t.route_id
-    JOIN buses bu ON bu.id = t.bus_id
-    WHERE t.date > ? AND t.status = 'Planned'
-    ORDER BY t.date ASC, t.time ASC
-    LIMIT 8
-  `).all(targetDate);
-
-  const upcomingTrips = rawUpcoming.map((t) => {
-    const layout = getBusLayout(t);
-    const cap = countSeats(layout);
-    const bookedCount = db.prepare('SELECT COUNT(*) AS c FROM booking_seats WHERE trip_id = ?').get(t.id).c;
-    return {
-      id: t.id,
-      route_name: t.route_name,
-      source: t.source,
-      destination: t.destination,
-      bus_name: t.bus_name,
-      time: t.time,
-      date: t.date,
-      fare: t.fare,
-      capacity: cap,
-      bookedCount,
-      availableSeats: Math.max(0, cap - bookedCount),
-      occupancyPct: cap > 0 ? Math.round((bookedCount / cap) * 100) : 0,
-    };
-  });
-
-  res.json({
-    date: targetDate,
-    tripsCount: trips.length,
-    plannedCount,
-    inTransitCount,
-    completedCount,
-    cancelledCount,
-    totalCapacity,
-    totalBooked,
-    availableSeats: Math.max(0, totalCapacity - totalBooked),
-    occupancyRate,
-    collectedToday: finRow ? finRow.collected : 0,
-    cashCollectedToday: finRow ? finRow.cash_collected : 0,
-    upiCollectedToday: finRow ? finRow.upi_collected : 0,
-    cardCollectedToday: finRow ? finRow.card_collected : 0,
-    dueToday: finRow ? finRow.due : 0,
-    dueBookingsCountToday,
-    totalDueAllTime: allTimeDue,
-    activeTrips,
-    upcomingTrips,
-    recentBookings,
-  });
+  res.json(computeDashboardStats(req.query.date));
 });
 
 /* ---------- Booking Cancellation & Seat Release ---------- */
@@ -1587,6 +1651,7 @@ router.post('/bookings/:id/pay-balance', requireAuth, requirePerm('can_collect_p
 
 /* ---------- Audit Logs ---------- */
 router.get('/audit-logs', requireAuth, requirePerm('can_view_logs'), (req, res) => {
+  if (typeof db.flushAuditLogs === 'function') db.flushAuditLogs();
   const limit = Math.min(200, Math.max(10, Number(req.query.limit) || 100));
   const rawLogs = db.prepare('SELECT * FROM audit_logs ORDER BY id DESC LIMIT ?').all(limit);
   const logs = rawLogs.map((l) => ({

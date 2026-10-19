@@ -43,17 +43,14 @@ try {
 
 let isSyncing = false;
 let syncQueued = false;
+let syncTimeout = null;
 
 db.syncCloud = () => {
   if (!isTurso || typeof db.sync !== 'function') return;
 
-  if (isSyncing) {
-    syncQueued = true;
-    return;
-  }
-
-  // Non-blocking background sync: HTTP requests return immediately to client
-  setImmediate(() => {
+  if (syncTimeout) clearTimeout(syncTimeout);
+  syncTimeout = setTimeout(() => {
+    syncTimeout = null;
     if (isSyncing) {
       syncQueued = true;
       return;
@@ -67,10 +64,10 @@ db.syncCloud = () => {
       isSyncing = false;
       if (syncQueued) {
         syncQueued = false;
-        setTimeout(() => db.syncCloud(), 150);
+        setTimeout(() => db.syncCloud(), 5000);
       }
     }
-  });
+  }, 10000);
 };
 
 try {
@@ -294,20 +291,40 @@ ensureColumn('booking_seats', 'seat_fare', 'REAL NOT NULL DEFAULT 0');
   } catch (e) {}
 })();
 
-function logAudit(action, entityType, entityId, details, performedBy, role) {
+const auditQueue = [];
+let auditFlushTimer = null;
+
+function flushAuditLogs() {
+  if (auditQueue.length === 0) return;
+  const batch = auditQueue.splice(0, auditQueue.length);
   try {
-    db.prepare('INSERT INTO audit_logs (action, entity_type, entity_id, details, performed_by, role) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(
-        String(action || ''),
-        String(entityType || ''),
-        String(entityId || ''),
-        typeof details === 'object' ? JSON.stringify(details) : String(details || ''),
-        String(performedBy || 'System'),
-        String(role || 'System')
-      );
-    db.syncCloud();
+    const insert = db.prepare('INSERT INTO audit_logs (action, entity_type, entity_id, details, performed_by, role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+    db.transaction(() => {
+      for (const item of batch) {
+        insert.run(item.action, item.entityType, item.entityId, item.details, item.performedBy, item.role, item.createdAt);
+      }
+    })();
   } catch (err) {
-    console.warn('Audit log write notice:', err.message);
+    console.warn('Audit batch write notice:', err.message);
+  }
+}
+
+function logAudit(action, entityType, entityId, details, performedBy, role) {
+  auditQueue.push({
+    action: String(action || ''),
+    entityType: String(entityType || ''),
+    entityId: String(entityId || ''),
+    details: typeof details === 'object' ? JSON.stringify(details) : String(details || ''),
+    performedBy: String(performedBy || 'System'),
+    role: String(role || 'System'),
+    createdAt: new Date().toISOString().replace('T', ' ').slice(0, 19)
+  });
+
+  if (!auditFlushTimer) {
+    auditFlushTimer = setTimeout(() => {
+      auditFlushTimer = null;
+      flushAuditLogs();
+    }, 2000);
   }
 }
 
@@ -643,6 +660,7 @@ function setSetting(key, val) {
 }
 
 db.logAudit = logAudit;
+db.flushAuditLogs = flushAuditLogs;
 db.helpers = {
   parsePattern,
   defaultLayout,
@@ -652,6 +670,7 @@ db.helpers = {
   serializeLayout,
   resolvePaidStatus,
   logAudit,
+  flushAuditLogs,
   ALL_PERMISSIONS,
   defaultPermissionsForRole,
   parseUserPermissions,
