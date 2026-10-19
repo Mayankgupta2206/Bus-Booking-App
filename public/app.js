@@ -1699,7 +1699,8 @@ function renderTripList(trips, wrap) {
     const tripId = b.getAttribute('data-select');
     b.disabled = true; b.innerHTML = '<span class="spin"></span>';
     try {
-      const [trip, seatData] = await Promise.all([api('/trips/' + tripId), api('/trips/' + tripId + '/seats')]);
+      const seatData = await api('/trips/' + tripId + '/seats');
+      const trip = seatData.trip || (await api('/trips/' + tripId));
       bookingCtx = {
         step: 2, tripId, trip, seatData, selected: [], pax: {},
         mode: 'individual', groupContact: '', applyAll: true,
@@ -2202,55 +2203,62 @@ function attachBookingStep2() {
   });
 
   document.querySelectorAll('[data-seat]').forEach((el) => {
-    el.onclick = async () => {
+    el.onclick = () => {
       const lab = el.getAttribute('data-seat');
       const i = bookingCtx.selected.indexOf(lab);
       const mySession = getSessionId();
 
+      const refreshForms = () => {
+        const paxWrap = document.getElementById('bookingPaxWrap');
+        if (paxWrap) {
+          paxWrap.innerHTML = renderPaxCardsHtml();
+          attachPaxInputs();
+        }
+        const payWrap = document.getElementById('bookingPaymentWrap');
+        if (payWrap) {
+          payWrap.innerHTML = renderBookingPayBoxHtml();
+          attachPayInputs();
+        }
+      };
+
       if (i >= 0) {
-        // Deselect seat
+        // Deselect seat instantly (0ms)
         bookingCtx.selected.splice(i, 1);
         delete bookingCtx.pax[lab];
         el.classList.remove('seat-sel');
         el.classList.add('seat-avail');
-        try {
-          api('/trips/' + bookingCtx.tripId + '/seats/unlock', {
-            method: 'POST',
-            body: JSON.stringify({ seatLabel: lab, sessionId: mySession })
-          }).catch(() => {});
-        } catch (e) {}
+        refreshForms();
+        api('/trips/' + bookingCtx.tripId + '/seats/unlock', {
+          method: 'POST',
+          body: JSON.stringify({ seatLabel: lab, sessionId: mySession })
+        }).catch(() => {});
       } else {
-        // Select seat & lock for 5 minutes
-        try {
-          await api('/trips/' + bookingCtx.tripId + '/seats/lock', {
-            method: 'POST',
-            body: JSON.stringify({ seatLabel: lab, sessionId: mySession })
-          });
-          bookingCtx.selected.push(lab);
-          if (window._returnPaxStash && window._returnPaxStash.length) {
-            const nextPax = window._returnPaxStash[bookingCtx.selected.length - 1];
-            if (nextPax) {
-              bookingCtx.pax[lab] = { ...nextPax };
-            }
+        // Select seat instantly (Optimistic UI - 0ms delay)
+        bookingCtx.selected.push(lab);
+        if (window._returnPaxStash && window._returnPaxStash.length) {
+          const nextPax = window._returnPaxStash[bookingCtx.selected.length - 1];
+          if (nextPax) {
+            bookingCtx.pax[lab] = { ...nextPax };
           }
-          el.classList.remove('seat-avail');
-          el.classList.add('seat-sel');
-        } catch (err) {
-          toast(err.message || 'Seat is currently unavailable.', true);
-          return;
         }
-      }
+        el.classList.remove('seat-avail');
+        el.classList.add('seat-sel');
+        refreshForms();
 
-      // Smooth in-place updates
-      const paxWrap = document.getElementById('bookingPaxWrap');
-      if (paxWrap) {
-        paxWrap.innerHTML = renderPaxCardsHtml();
-        attachPaxInputs();
-      }
-      const payWrap = document.getElementById('bookingPaymentWrap');
-      if (payWrap) {
-        payWrap.innerHTML = renderBookingPayBoxHtml();
-        attachPayInputs();
+        // Lock in background asynchronously
+        api('/trips/' + bookingCtx.tripId + '/seats/lock', {
+          method: 'POST',
+          body: JSON.stringify({ seatLabel: lab, sessionId: mySession })
+        }).catch((err) => {
+          // Revert if lock failed on server (e.g. seat was already taken)
+          const idx = bookingCtx.selected.indexOf(lab);
+          if (idx >= 0) bookingCtx.selected.splice(idx, 1);
+          delete bookingCtx.pax[lab];
+          el.classList.remove('seat-sel');
+          el.classList.add('seat-avail');
+          refreshForms();
+          toast(err.message || 'Seat is currently unavailable.', true);
+        });
       }
     };
   });

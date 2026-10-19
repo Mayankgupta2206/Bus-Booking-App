@@ -514,16 +514,15 @@ router.get('/trips/:id', requireAuth, (req, res) => {
 });
 
 router.get('/trips/:id/seats', requireAuth, (req, res) => {
-  const t = db.prepare(`SELECT t.*, b.rows AS bus_rows, b.cols AS bus_cols, b.layout_json, b.pattern
-                        FROM trips t JOIN buses b ON b.id = t.bus_id WHERE t.id = ?`).get(req.params.id);
+  const t = db.prepare(`SELECT t.*, r.name AS route_name, r.source, r.destination, r.fare AS fare,
+                                b.name AS bus_name, b.rows AS bus_rows, b.cols AS bus_cols, b.layout_json, b.pattern
+                         FROM trips t
+                         JOIN routes r ON r.id = t.route_id
+                         JOIN buses b ON b.id = t.bus_id
+                         WHERE t.id = ?`).get(req.params.id);
   if (!t) return res.status(404).json({ error: 'Trip not found.' });
 
-  // Clean up expired locks
   const now = Date.now();
-  try {
-    db.prepare('DELETE FROM seat_locks WHERE expires_at < ?').run(now);
-  } catch (e) {}
-
   const seats = db.prepare(`SELECT bs.id, bs.seat_label, bs.passenger_name, bs.age, bs.gender, bs.contact,
                                     bs.boarded, bs.boarded_at, bs.boarded_by, bs.concession, bs.seat_fare,
                                     bk.pnr, bk.booked_by, bk.booked_by_username, bk.booked_by_role,
@@ -535,12 +534,15 @@ router.get('/trips/:id/seats', requireAuth, (req, res) => {
   const booked = {};
   seats.forEach((s) => { booked[s.seat_label] = s; });
 
-  const activeLocks = db.prepare('SELECT seat_label, locked_by, session_id, expires_at FROM seat_locks WHERE trip_id = ?').all(req.params.id);
+  // High-performance index query for active locks without blocking write transaction
+  const activeLocks = db.prepare('SELECT seat_label, locked_by, session_id, expires_at FROM seat_locks WHERE trip_id = ? AND expires_at > ?').all(req.params.id, now);
   const locked = {};
   activeLocks.forEach((l) => { locked[l.seat_label] = l; });
 
   const grid = getBusLayout(t);
-  res.json({ grid, booked, locked, seatCount: countSeats(grid) });
+  const seatCount = countSeats(grid);
+  const trip = { ...t, totalSeats: seatCount, layout: grid };
+  res.json({ trip, grid, booked, locked, seatCount });
 });
 
 /* Complete All-in-One Trip Report (HTML & CSV) */
