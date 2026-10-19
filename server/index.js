@@ -14,7 +14,7 @@ app.use(express.static(path.join(__dirname, '..', 'public'), {
       res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
     }
     if (filePath.endsWith('.html')) {
-      // HTML is never cached so app updates are immediate
+      // HTML is never cached so app updates are immediate 
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.setHeader('Pragma', 'no-cache');
       res.setHeader('Expires', '0');

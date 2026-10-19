@@ -413,6 +413,50 @@ router.post('/trips', requireAuth, requirePerm('can_manage_trips'), (req, res) =
   res.status(201).json(trip);
 });
 
+/* Bulk / Recurring Trip Scheduler */
+router.post('/trips/recurring', requireAuth, requirePerm('can_manage_trips'), (req, res) => {
+  const { routeId, busId, startDate, endDate, time, daysOfWeek } = req.body || {};
+  if (!routeId || !busId || !startDate || !endDate || !time) {
+    return res.status(400).json({ error: 'Route, Bus, Start Date, End Date, and Time are required.' });
+  }
+  const route = db.prepare('SELECT * FROM routes WHERE id = ?').get(routeId);
+  const bus = db.prepare('SELECT * FROM buses WHERE id = ?').get(busId);
+  if (!route || !bus) return res.status(400).json({ error: 'Route or Bus not found.' });
+  if (!route.active) return res.status(400).json({ error: 'Cannot schedule trips on an inactive route.' });
+  if (!bus.active) return res.status(400).json({ error: 'Cannot schedule trips on an inactive bus.' });
+
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+  if (start > end) return res.status(400).json({ error: 'Start date cannot be after end date.' });
+
+  const activeDays = Array.isArray(daysOfWeek) && daysOfWeek.length ? daysOfWeek.map(Number) : [0, 1, 2, 3, 4, 5, 6];
+
+  const createdTrips = [];
+  const insertTrip = db.prepare('INSERT INTO trips (route_id, bus_id, date, time) VALUES (?, ?, ?, ?)');
+  const checkExisting = db.prepare('SELECT id FROM trips WHERE route_id = ? AND bus_id = ? AND date = ? AND time = ?');
+
+  const cur = new Date(start);
+  while (cur <= end) {
+    const day = cur.getDay();
+    if (activeDays.includes(day)) {
+      const dateStr = cur.toISOString().slice(0, 10);
+      const exists = checkExisting.get(routeId, busId, dateStr, time);
+      if (!exists) {
+        const info = insertTrip.run(routeId, busId, dateStr, time);
+        createdTrips.push({ id: info.lastInsertRowid, date: dateStr, time });
+      }
+    }
+    cur.setDate(cur.getDate() + 1);
+  }
+
+  db.syncCloud();
+  logAudit('RECURRING_TRIPS_SCHEDULED', 'TRIP', `${createdTrips.length} trips`, {
+    route: route.name, bus: bus.name, startDate, endDate, time, count: createdTrips.length
+  }, req.user.name, req.user.role);
+
+  res.status(201).json({ success: true, count: createdTrips.length, createdTrips });
+});
+
 router.patch('/trips/:id/cancel', requireAuth, requirePerm('can_manage_trips'), (req, res) => {
   const trip = db.prepare('SELECT * FROM trips WHERE id = ?').get(req.params.id);
   if (!trip) return res.status(404).json({ error: 'Trip not found.' });
@@ -473,42 +517,207 @@ router.get('/trips/:id/seats', requireAuth, (req, res) => {
   const t = db.prepare(`SELECT t.*, b.rows AS bus_rows, b.cols AS bus_cols, b.layout_json, b.pattern
                         FROM trips t JOIN buses b ON b.id = t.bus_id WHERE t.id = ?`).get(req.params.id);
   if (!t) return res.status(404).json({ error: 'Trip not found.' });
+
+  // Clean up expired locks
+  const now = Date.now();
+  try {
+    db.prepare('DELETE FROM seat_locks WHERE expires_at < ?').run(now);
+  } catch (e) {}
+
   const seats = db.prepare(`SELECT bs.id, bs.seat_label, bs.passenger_name, bs.age, bs.gender, bs.contact,
-                                    bs.boarded, bs.boarded_at, bs.boarded_by,
+                                    bs.boarded, bs.boarded_at, bs.boarded_by, bs.concession, bs.seat_fare,
                                     bk.pnr, bk.booked_by, bk.booked_by_username, bk.booked_by_role,
-                                    bk.paid_status, bk.amount_paid, bk.total_amount, bk.is_group, bk.created_at
+                                    bk.paid_status, bk.amount_paid, bk.total_amount, bk.is_group, bk.created_at,
+                                    bk.fare_per_seat, bk.discount_amount, bk.discount_reason, bk.coupon_code
                              FROM booking_seats bs
                              JOIN bookings bk ON bk.id = bs.booking_id
                              WHERE bs.trip_id = ?`).all(req.params.id);
   const booked = {};
   seats.forEach((s) => { booked[s.seat_label] = s; });
+
+  const activeLocks = db.prepare('SELECT seat_label, locked_by, session_id, expires_at FROM seat_locks WHERE trip_id = ?').all(req.params.id);
+  const locked = {};
+  activeLocks.forEach((l) => { locked[l.seat_label] = l; });
+
   const grid = getBusLayout(t);
-  res.json({ grid, booked, seatCount: countSeats(grid) });
+  res.json({ grid, booked, locked, seatCount: countSeats(grid) });
+});
+
+/* Complete All-in-One Trip Report (HTML & CSV) */
+router.get('/trips/:id/report', requireAuth, async (req, res) => {
+  try {
+    const archiveData = await buildTripArchive(req.params.id);
+    if (req.query.format === 'csv') {
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="trip_${req.params.id}_complete_manifest.csv"`);
+      return res.send(archiveData.csvContent);
+    }
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    return res.send(archiveData.htmlContent);
+  } catch (err) {
+    res.status(500).send('Failed to generate trip report: ' + err.message);
+  }
+});
+
+/* Temporary Seat Lock & Unlock */
+router.post('/trips/:id/seats/lock', requireAuth, (req, res) => {
+  const { seatLabel, sessionId } = req.body || {};
+  if (!seatLabel) return res.status(400).json({ error: 'seatLabel is required.' });
+
+  const tripId = Number(req.params.id);
+  const now = Date.now();
+
+  // Check if seat is already booked
+  const isBooked = db.prepare('SELECT id FROM booking_seats WHERE trip_id = ? AND seat_label = ?').get(tripId, String(seatLabel));
+  if (isBooked) return res.status(409).json({ error: `Seat ${seatLabel} is already booked.` });
+
+  // Check if seat is locked by someone else and lock has not expired
+  const existingLock = db.prepare('SELECT * FROM seat_locks WHERE trip_id = ? AND seat_label = ?').get(tripId, String(seatLabel));
+  if (existingLock && existingLock.expires_at > now && existingLock.session_id !== sessionId) {
+    return res.status(409).json({
+      error: `Seat ${seatLabel} is temporarily on hold by ${existingLock.locked_by}. Please choose another seat.`,
+      lockedBy: existingLock.locked_by
+    });
+  }
+
+  // 5 minutes lock
+  const expiresAt = now + 5 * 60 * 1000;
+  try {
+    db.prepare(`
+      INSERT INTO seat_locks (trip_id, seat_label, locked_by, session_id, expires_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(trip_id, seat_label) DO UPDATE SET
+        locked_by = excluded.locked_by,
+        session_id = excluded.session_id,
+        expires_at = excluded.expires_at
+    `).run(tripId, String(seatLabel), req.user.name, sessionId || req.user.username, expiresAt);
+  } catch (e) {
+    console.warn('Seat lock notice:', e.message);
+    return res.status(500).json({ error: 'Failed to acquire seat lock. Please try again.' });
+  }
+
+  res.json({ success: true, seatLabel, expiresAt });
+});
+
+router.post('/trips/:id/seats/unlock', requireAuth, (req, res) => {
+  const { seatLabel, sessionId } = req.body || {};
+  if (!seatLabel) return res.status(400).json({ error: 'seatLabel is required.' });
+  try {
+    db.prepare('DELETE FROM seat_locks WHERE trip_id = ? AND seat_label = ? AND (session_id = ? OR locked_by = ?)').run(
+      Number(req.params.id), String(seatLabel), sessionId || '', req.user.name
+    );
+  } catch (e) {
+    console.warn('Seat unlock notice:', e.message);
+  }
+  res.json({ success: true, seatLabel });
+});
+
+/* ---------- Coupons & Discounts ---------- */
+router.get('/coupons', requireAuth, (req, res) => {
+  const coupons = db.prepare('SELECT id, code, discount_type, discount_val, min_booking_amount, valid_until, active FROM coupons WHERE active = 1 ORDER BY code').all();
+  res.json(coupons);
+});
+
+router.post('/coupons/validate', requireAuth, (req, res) => {
+  const { code, grossAmount } = req.body || {};
+  if (!code) return res.status(400).json({ error: 'Coupon code is required.' });
+  const coupon = db.prepare('SELECT * FROM coupons WHERE UPPER(code) = ? AND active = 1').get(String(code).trim().toUpperCase());
+  if (!coupon) return res.status(404).json({ error: 'Invalid or inactive coupon code.' });
+
+  const today = getTodayDateIST();
+  if (coupon.valid_until && coupon.valid_until < today) {
+    return res.status(400).json({ error: `Coupon ${coupon.code} expired on ${coupon.valid_until}.` });
+  }
+
+  const gross = Number(grossAmount) || 0;
+  if (coupon.min_booking_amount > 0 && gross < coupon.min_booking_amount) {
+    return res.status(400).json({ error: `Minimum booking amount of ₹${coupon.min_booking_amount} required for this coupon.` });
+  }
+
+  let discount = 0;
+  if (coupon.discount_type === 'flat') {
+    discount = Math.min(gross, Number(coupon.discount_val));
+  } else if (coupon.discount_type === 'percent') {
+    discount = Math.min(gross, Math.round((gross * Number(coupon.discount_val)) / 100));
+  }
+
+  res.json({
+    valid: true,
+    code: coupon.code,
+    discountType: coupon.discount_type,
+    discountVal: coupon.discount_val,
+    discountAmount: discount,
+    finalAmount: Math.max(0, gross - discount)
+  });
+});
+
+/* ---------- Dynamic Concessions & Policies ---------- */
+router.get('/concessions', requireAuth, (req, res) => {
+  const list = db.prepare('SELECT id, name, discount_type, discount_val, min_age, max_age, active FROM concessions WHERE active = 1 ORDER BY id ASC').all();
+  res.json(list);
+});
+
+router.get('/admin/concessions', requireAuth, requireAdmin, (req, res) => {
+  const list = db.prepare('SELECT * FROM concessions ORDER BY id ASC').all();
+  res.json(list);
+});
+
+router.post('/admin/concessions', requireAuth, requireAdmin, (req, res) => {
+  const { name, discount_type, discount_val, min_age, max_age, active } = req.body || {};
+  if (!name || discount_val == null) return res.status(400).json({ error: 'Name and discount value are required.' });
+  const type = discount_type === 'flat' ? 'flat' : 'percent';
+  const val = Math.max(0, Number(discount_val));
+  if (type === 'percent' && val > 100) return res.status(400).json({ error: 'Percentage discount cannot exceed 100%.' });
+  const minA = min_age != null && min_age !== '' ? Number(min_age) : null;
+  const maxA = max_age != null && max_age !== '' ? Number(max_age) : null;
+  const act = active === false || active === 0 ? 0 : 1;
+  try {
+    const info = db.prepare('INSERT INTO concessions (name, discount_type, discount_val, min_age, max_age, active) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(String(name).trim(), type, val, minA, maxA, act);
+    db.syncCloud();
+    res.status(201).json({ ok: true, id: info.lastInsertRowid, message: 'Concession created successfully.' });
+  } catch (e) {
+    if (String(e).includes('UNIQUE')) return res.status(409).json({ error: 'A concession with this name already exists.' });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.put('/admin/concessions/:id', requireAuth, requireAdmin, (req, res) => {
+  const { name, discount_type, discount_val, min_age, max_age, active } = req.body || {};
+  const conc = db.prepare('SELECT * FROM concessions WHERE id = ?').get(req.params.id);
+  if (!conc) return res.status(404).json({ error: 'Concession not found.' });
+  const newName = name ? String(name).trim() : conc.name;
+  const type = discount_type ? (discount_type === 'flat' ? 'flat' : 'percent') : conc.discount_type;
+  const val = discount_val != null ? Math.max(0, Number(discount_val)) : conc.discount_val;
+  if (type === 'percent' && val > 100) return res.status(400).json({ error: 'Percentage discount cannot exceed 100%.' });
+  const minA = min_age !== undefined ? (min_age !== '' && min_age != null ? Number(min_age) : null) : conc.min_age;
+  const maxA = max_age !== undefined ? (max_age !== '' && max_age != null ? Number(max_age) : null) : conc.max_age;
+  const act = active !== undefined ? (active ? 1 : 0) : conc.active;
+  try {
+    db.prepare('UPDATE concessions SET name = ?, discount_type = ?, discount_val = ?, min_age = ?, max_age = ?, active = ? WHERE id = ?')
+      .run(newName, type, val, minA, maxA, act, req.params.id);
+    db.syncCloud();
+    res.json({ ok: true, message: 'Concession updated.' });
+  } catch (e) {
+    if (String(e).includes('UNIQUE')) return res.status(409).json({ error: 'A concession with this name already exists.' });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.delete('/admin/concessions/:id', requireAuth, requireAdmin, (req, res) => {
+  db.prepare('DELETE FROM concessions WHERE id = ?').run(req.params.id);
+  db.syncCloud();
+  res.json({ ok: true, message: 'Concession deleted.' });
 });
 
 /* ---------- Bookings ---------- */
 router.post('/bookings', requireAuth, requireAgentOrAdmin, (req, res) => {
-  const { tripId, seats, isGroup, groupContact, paidStatus, amountPaid, pickupPoint, paymentMethod } = req.body || {};
+  const {
+    tripId, seats, isGroup, groupContact, paidStatus, amountPaid, pickupPoint, paymentMethod,
+    couponCode, discountAmount, discountReason
+  } = req.body || {};
   if (!tripId || !Array.isArray(seats) || seats.length === 0) {
     return res.status(400).json({ error: 'Please select at least one seat.' });
-  }
-
-  const sharedContact = isGroup ? (groupContact || (seats[0] && seats[0].contact)) : null;
-  if (isGroup && !phoneOk(sharedContact)) {
-    return res.status(400).json({ error: 'A valid phone number is required for group booking.' });
-  }
-
-  for (const s of seats) {
-    if (!s.label || !s.name || s.age === undefined || s.age === '' || !s.gender) {
-      return res.status(400).json({ error: 'Please fill all required fields.' });
-    }
-    if (Number(s.age) < 0 || Number(s.age) > 120) {
-      return res.status(400).json({ error: 'Please enter a valid age (0–120).' });
-    }
-    const contact = isGroup ? sharedContact : s.contact;
-    if (!phoneOk(contact)) {
-      return res.status(400).json({ error: 'A valid phone number is required for each passenger.' });
-    }
   }
 
   const trip = db.prepare(`SELECT t.*, r.fare AS fare FROM trips t JOIN routes r ON r.id = t.route_id WHERE t.id = ?`).get(tripId);
@@ -516,9 +725,95 @@ router.post('/bookings', requireAuth, requireAgentOrAdmin, (req, res) => {
   if (trip.status !== 'Planned') {
     return res.status(400).json({ error: 'This trip is not open for booking.' });
   }
+  if (isTripExpired(trip.date, trip.status)) {
+    return res.status(400).json({ error: 'Cannot book seats on a past or completed trip.' });
+  }
 
-  const farePerSeat = Number(trip.fare) || 0;
-  const totalAmount = farePerSeat * seats.length;
+  const sharedContact = isGroup ? (groupContact || (seats[0] && seats[0].contact)) : null;
+  if (isGroup && !phoneOk(sharedContact)) {
+    return res.status(400).json({ error: 'A valid phone number is required for group booking.' });
+  }
+
+  // Find first adult contact to inherit for young children
+  const adultPhone = sharedContact || seats.find(s => phoneOk(s.contact) && Number(s.age || 0) >= 12)?.contact;
+
+  for (const s of seats) {
+    if (!s.label || !s.name || s.age === undefined || s.age === '' || !s.gender) {
+      return res.status(400).json({ error: 'Please fill all required fields.' });
+    }
+    const ageNum = Number(s.age);
+    if (Number.isNaN(ageNum) || ageNum < 0 || ageNum > 120) {
+      return res.status(400).json({ error: 'Please enter a valid age (0–120).' });
+    }
+    let contact = isGroup ? sharedContact : s.contact;
+    // Allow young children under 12 to inherit the lead/adult contact
+    if (!contact && ageNum < 12 && adultPhone) {
+      contact = adultPhone;
+      s.contact = adultPhone;
+    }
+    if (!phoneOk(contact)) {
+      return res.status(400).json({ error: `A valid phone number is required for passenger ${s.name || s.label}.` });
+    }
+  }
+
+  let farePerSeat = Number(trip.fare) || 0;
+  if (pickupPoint) {
+    const stageMatch = String(pickupPoint).match(/[₹\$\s-]\s*(\d+(\.\d+)?)/);
+    if (stageMatch && Number(stageMatch[1]) > 0) {
+      farePerSeat = Number(stageMatch[1]);
+    }
+  }
+
+  // Load dynamic concessions
+  const allConcessions = db.prepare('SELECT name, discount_type, discount_val FROM concessions WHERE active = 1').all();
+  const concMap = {};
+  allConcessions.forEach((c) => { concMap[c.name.toLowerCase()] = c; });
+
+  // Calculate seat-level concession fares dynamically
+  let grossAmount = 0;
+  const processedSeats = seats.map((s) => {
+    const conc = String(s.concession || 'General').trim();
+    let seatFare = farePerSeat;
+    const rule = concMap[conc.toLowerCase()];
+    if (rule) {
+      if (rule.discount_type === 'flat') {
+        seatFare = Math.max(0, farePerSeat - Number(rule.discount_val));
+      } else {
+        const pct = Math.min(100, Math.max(0, Number(rule.discount_val)));
+        seatFare = Math.max(0, Math.round(farePerSeat * (1 - pct / 100)));
+      }
+    } else {
+      // Fallback
+      if (conc === 'Senior Citizen') seatFare = Math.round(farePerSeat * 0.8);
+      else if (conc === 'Child') seatFare = Math.round(farePerSeat * 0.5);
+      else if (conc === 'Seva Volunteer / Monk') seatFare = 0;
+    }
+    grossAmount += seatFare;
+    return { ...s, concession: conc, seatFare };
+  });
+
+  // Calculate discounts (coupon + manual)
+  let totalDiscount = 0;
+  let appliedCoupon = null;
+  if (couponCode) {
+    const coupon = db.prepare('SELECT * FROM coupons WHERE UPPER(code) = ? AND active = 1').get(String(couponCode).trim().toUpperCase());
+    if (coupon) {
+      appliedCoupon = coupon.code;
+      if (coupon.discount_type === 'flat') {
+        totalDiscount += Math.min(grossAmount, Number(coupon.discount_val));
+      } else {
+        totalDiscount += Math.min(grossAmount, Math.round((grossAmount * Number(coupon.discount_val)) / 100));
+      }
+    }
+  }
+
+  const manualDisc = Number(discountAmount) || 0;
+  if (manualDisc > 0) {
+    totalDiscount += manualDisc;
+  }
+  totalDiscount = Math.min(grossAmount, totalDiscount);
+  const totalAmount = Math.max(0, grossAmount - totalDiscount);
+
   let paidAmt = amountPaid != null ? Number(amountPaid) : 0;
   if (Number.isNaN(paidAmt) || paidAmt < 0) {
     return res.status(400).json({ error: 'Advance / amount paid must be a valid number.' });
@@ -532,24 +827,38 @@ router.post('/bookings', requireAuth, requireAgentOrAdmin, (req, res) => {
   const status = resolvePaidStatus(paidAmt, totalAmount);
   const method = paymentMethod || 'Cash';
 
-  const pnr = 'PNR' + Math.floor(100000 + Math.random() * 900000);
+  // Collision-safe PNR generator
+  let pnr;
+  let attempts = 0;
+  while (!pnr && attempts < 10) {
+    const candidate = 'PNR' + Math.floor(100000 + Math.random() * 900000);
+    const existing = db.prepare('SELECT id FROM bookings WHERE pnr = ?').get(candidate);
+    if (!existing) {
+      pnr = candidate;
+      break;
+    }
+    attempts++;
+  }
+  if (!pnr) pnr = 'PNR' + Date.now().toString().slice(-6);
 
   let bookingId;
   const tx = db.transaction(() => {
     const bookingInfo = db.prepare(`INSERT INTO bookings
       (pnr, trip_id, booked_by, booked_by_username, booked_by_role, is_group, group_contact,
-       fare_per_seat, total_amount, paid_status, amount_paid, pickup_point, payment_method)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+       fare_per_seat, total_amount, paid_status, amount_paid, pickup_point, payment_method,
+       discount_amount, discount_reason, coupon_code)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       pnr, tripId, req.user.name, req.user.username, req.user.role,
       isGroup ? 1 : 0, isGroup ? sharedContact : null,
-      farePerSeat, totalAmount, status, paidAmt, pickupPoint || null, method
+      farePerSeat, totalAmount, status, paidAmt, pickupPoint || null, method,
+      totalDiscount, discountReason || null, appliedCoupon || null
     );
     bookingId = bookingInfo.lastInsertRowid;
-    const insertSeat = db.prepare(`INSERT INTO booking_seats (booking_id,trip_id,seat_label,passenger_name,age,gender,contact)
-                                    VALUES (?,?,?,?,?,?,?)`);
-    for (const s of seats) {
-      const contact = isGroup ? sharedContact : s.contact;
-      insertSeat.run(bookingId, tripId, s.label, s.name, s.age, s.gender, contact);
+    const insertSeat = db.prepare(`INSERT INTO booking_seats (booking_id,trip_id,seat_label,passenger_name,age,gender,contact,concession,seat_fare)
+                                    VALUES (?,?,?,?,?,?,?,?,?)`);
+    for (const s of processedSeats) {
+      const contact = isGroup ? sharedContact : (s.contact || adultPhone);
+      insertSeat.run(bookingId, tripId, s.label, s.name, s.age, s.gender, contact, s.concession, s.seatFare);
     }
   });
 
@@ -557,7 +866,10 @@ router.post('/bookings', requireAuth, requireAgentOrAdmin, (req, res) => {
     tx();
     db.syncCloud();
     logAudit('BOOKING_CREATED', 'BOOKING', pnr, {
-      seats: seats.map(s => s.label),
+      seats: processedSeats.map(s => s.label),
+      grossAmount,
+      discount: totalDiscount,
+      coupon: appliedCoupon,
       totalAmount,
       amountPaid: paidAmt,
       paidStatus: status,
@@ -568,12 +880,13 @@ router.post('/bookings', requireAuth, requireAgentOrAdmin, (req, res) => {
     if (String(e).includes('UNIQUE')) {
       return res.status(409).json({ error: 'One or more selected seats are no longer available. Please refresh and try again.' });
     }
-    return res.status(500).json({ error: 'Could not complete booking.' });
+    return res.status(500).json({ error: 'Could not complete booking: ' + e.message });
   }
 
   res.status(201).json({
-    pnr, tripId, seats, bookingId,
-    farePerSeat, totalAmount, paidStatus: status, amountPaid: paidAmt,
+    pnr, tripId, seats: processedSeats, bookingId,
+    farePerSeat, grossAmount, discountAmount: totalDiscount, couponCode: appliedCoupon,
+    totalAmount, paidStatus: status, amountPaid: paidAmt,
     paymentMethod: method,
     pickupPoint: pickupPoint || null,
     bookedBy: { name: req.user.name, username: req.user.username, role: req.user.role },
@@ -656,6 +969,7 @@ router.get(['/public/pass', '/public/pass/:pnr'], (req, res) => {
 
   const bookingSelectSql = `
     SELECT b.id, b.pnr, b.trip_id, b.total_amount, b.amount_paid, b.paid_status,
+           b.fare_per_seat, b.discount_amount, b.discount_reason, b.coupon_code,
            b.pickup_point, b.group_contact, b.booked_by, b.created_at,
            t.date AS trip_date, t.time AS trip_time, t.status AS trip_status,
            r.name AS route_name, r.source, r.destination, bu.name AS bus_name
@@ -674,7 +988,7 @@ router.get(['/public/pass', '/public/pass/:pnr'], (req, res) => {
   if (directBooking) {
     const expired = isTripExpired(directBooking.trip_date, directBooking.trip_status);
     const seats = db.prepare(`
-      SELECT id, seat_label, passenger_name, age, gender, contact, boarded
+      SELECT id, seat_label, passenger_name, age, gender, contact, concession, seat_fare, boarded
       FROM booking_seats
       WHERE booking_id = ?
       ORDER BY seat_label ASC
@@ -712,7 +1026,7 @@ router.get(['/public/pass', '/public/pass/:pnr'], (req, res) => {
       const b = matches[0];
       const expired = isTripExpired(b.trip_date, b.trip_status);
       const seats = db.prepare(`
-        SELECT id, seat_label, passenger_name, age, gender, contact, boarded
+        SELECT id, seat_label, passenger_name, age, gender, contact, concession, seat_fare, boarded
         FROM booking_seats
         WHERE booking_id = ?
         ORDER BY seat_label ASC
@@ -729,7 +1043,7 @@ router.get(['/public/pass', '/public/pass/:pnr'], (req, res) => {
       const bookingsWithSeats = matches.map((b) => ({
         ...b,
         seats: db.prepare(`
-          SELECT id, seat_label, passenger_name, age, gender, contact, boarded
+          SELECT id, seat_label, passenger_name, age, gender, contact, concession, seat_fare, boarded
           FROM booking_seats
           WHERE booking_id = ?
           ORDER BY seat_label ASC
@@ -1015,6 +1329,66 @@ router.delete('/bookings/:id/seats/:seatLabel', requireAuth, (req, res) => {
   res.json({ ok: true, freedSeat: label, message: `Seat ${label} released.` });
 });
 
+/* 1-Click Seat Swap / Shift (Without cancellation) */
+router.post('/bookings/:id/seats/:seatLabel/swap', requireAuth, (req, res) => {
+  const { newSeatLabel } = req.body || {};
+  if (!newSeatLabel) return res.status(400).json({ error: 'Target seat label is required.' });
+
+  const booking = db.prepare(`SELECT b.*, t.bus_id, t.status AS trip_status, t.date AS trip_date FROM bookings b JOIN trips t ON t.id = b.trip_id WHERE b.id = ?`).get(req.params.id);
+  if (!booking) return res.status(404).json({ error: 'Booking not found.' });
+
+  if (isTripExpired(booking.trip_date, booking.trip_status)) {
+    return res.status(400).json({ error: 'Cannot swap seats for a past or completed trip.' });
+  }
+
+  const isOwner = req.user.username === booking.booked_by_username;
+  const canSwap = req.user.role === 'Admin' || req.user.role === 'Supervisor' || isOwner || (req.user.permissions && req.user.permissions.can_book);
+  if (!canSwap) return res.status(403).json({ error: 'Permission denied to modify seat.' });
+
+  const oldLabel = decodeURIComponent(req.params.seatLabel);
+  const targetLabel = String(newSeatLabel).trim();
+
+  if (oldLabel === targetLabel) {
+    return res.status(400).json({ error: 'Current seat and target seat are the same.' });
+  }
+
+  const currentSeat = db.prepare('SELECT * FROM booking_seats WHERE booking_id = ? AND seat_label = ?').get(booking.id, oldLabel);
+  if (!currentSeat) return res.status(404).json({ error: `Seat ${oldLabel} not found in this booking.` });
+
+  // Validate bus layout contains target seat
+  const bus = db.prepare('SELECT layout_json, rows, pattern FROM buses WHERE id = ?').get(booking.bus_id);
+  const layout = getBusLayout(bus);
+  const allLabels = (layout || []).flat().filter(Boolean);
+  if (!allLabels.includes(targetLabel)) {
+    return res.status(400).json({ error: `Seat ${targetLabel} does not exist on this bus.` });
+  }
+
+  // Check if target seat is already occupied
+  const occupied = db.prepare('SELECT id FROM booking_seats WHERE trip_id = ? AND seat_label = ?').get(booking.trip_id, targetLabel);
+  if (occupied) {
+    return res.status(409).json({ error: `Seat ${targetLabel} is already booked by another passenger.` });
+  }
+
+  // Perform atomic swap
+  db.prepare('UPDATE booking_seats SET seat_label = ? WHERE id = ?').run(targetLabel, currentSeat.id);
+  db.syncCloud();
+
+  logAudit('SEAT_SWAPPED', 'BOOKING', booking.pnr, {
+    oldSeat: oldLabel,
+    newSeat: targetLabel,
+    passenger: currentSeat.passenger_name,
+    tripId: booking.trip_id
+  }, req.user.name, req.user.role);
+
+  res.json({
+    ok: true,
+    message: `Seat ${oldLabel} successfully shifted to ${targetLabel} for ${currentSeat.passenger_name}.`,
+    pnr: booking.pnr,
+    oldSeat: oldLabel,
+    newSeat: targetLabel,
+  });
+});
+
 /* ---------- Admin: Database Backup ---------- */
 router.post('/admin/backup', requireAuth, requireAdmin, async (req, res) => {
   try {
@@ -1268,6 +1642,41 @@ router.get('/archive/download/:id', requireAuth, (req, res) => {
   }
 
   res.status(404).json({ error: 'Archive file not found on disk. Please open via Google Drive link.' });
+});
+
+router.get('/archive/view/:id', requireAuth, async (req, res) => {
+  const archive = db.prepare('SELECT * FROM trip_archives WHERE id = ?').get(req.params.id);
+  if (!archive) return res.status(404).send('Archive record not found');
+
+  try {
+    const JSZip = require('jszip');
+    const targetPath = (archive.local_path && fs.existsSync(archive.local_path))
+      ? archive.local_path
+      : path.join(ARCHIVES_DIR, archive.archive_filename);
+
+    if (fs.existsSync(targetPath)) {
+      const zipBuffer = fs.readFileSync(targetPath);
+      const zip = await JSZip.loadAsync(zipBuffer);
+      const htmlFile = zip.file('Trip_Complete_Report.html');
+      if (htmlFile) {
+        const html = await htmlFile.async('string');
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        return res.send(html);
+      }
+    }
+
+    if (archive.archive_data) {
+      const parsed = JSON.parse(archive.archive_data);
+      const { generateTripReportHtml } = require('./archive');
+      const html = generateTripReportHtml(parsed.trip, parsed.bookings, parsed.cancelled, parsed.stats, {});
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.send(html);
+    }
+
+    res.status(404).send('Archive report document not found.');
+  } catch (e) {
+    res.status(500).send('Error loading archive report: ' + e.message);
+  }
 });
 
 router.post('/archive/config', requireAuth, requirePerm('can_manage_settings'), (req, res) => {

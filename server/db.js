@@ -73,7 +73,8 @@ db.syncCloud = () => {
   });
 };
 
-db.exec(`
+try {
+  db.exec(`
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   username TEXT UNIQUE NOT NULL,
@@ -188,12 +189,57 @@ CREATE TABLE IF NOT EXISTS trip_archives (
   archived_at TEXT NOT NULL DEFAULT (datetime('now')),
   status TEXT NOT NULL DEFAULT 'Archived'
 );
+
+CREATE TABLE IF NOT EXISTS coupons (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT UNIQUE NOT NULL,
+  discount_type TEXT NOT NULL CHECK(discount_type IN ('flat', 'percent')),
+  discount_val REAL NOT NULL,
+  min_booking_amount REAL DEFAULT 0,
+  valid_until TEXT,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS seat_locks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  trip_id INTEGER NOT NULL REFERENCES trips(id),
+  seat_label TEXT NOT NULL,
+  locked_by TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  UNIQUE(trip_id, seat_label)
+);
+
+CREATE INDEX IF NOT EXISTS idx_booking_seats_booking_id ON booking_seats(booking_id);
+CREATE INDEX IF NOT EXISTS idx_bookings_trip_id ON bookings(trip_id);
+CREATE INDEX IF NOT EXISTS idx_trips_date_status ON trips(date, status);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_seat_locks_trip ON seat_locks(trip_id, expires_at);
+
+CREATE TABLE IF NOT EXISTS concessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE NOT NULL,
+  discount_type TEXT NOT NULL DEFAULT 'percent' CHECK(discount_type IN ('percent', 'flat')),
+  discount_val REAL NOT NULL DEFAULT 0,
+  min_age INTEGER,
+  max_age INTEGER,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `);
+} catch (e) {
+  console.warn('Schema init notice (ignored if provisioned):', e.message);
+}
 
 function ensureColumn(table, column, defSql) {
-  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
-  if (!cols.some((c) => c.name === column)) {
-    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${defSql}`);
+  try {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+    if (!cols.some((c) => c.name === column)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${defSql}`);
+    }
+  } catch (err) {
+    // Column already exists or table sync notice
   }
 }
 
@@ -212,9 +258,41 @@ ensureColumn('bookings', 'paid_status', "TEXT NOT NULL DEFAULT 'Unpaid'");
 ensureColumn('bookings', 'amount_paid', 'REAL NOT NULL DEFAULT 0');
 ensureColumn('bookings', 'pickup_point', 'TEXT');
 ensureColumn('bookings', 'payment_method', "TEXT NOT NULL DEFAULT 'Cash'");
+ensureColumn('bookings', 'discount_amount', 'REAL NOT NULL DEFAULT 0');
+ensureColumn('bookings', 'discount_reason', 'TEXT');
+ensureColumn('bookings', 'coupon_code', 'TEXT');
 ensureColumn('booking_seats', 'boarded', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('booking_seats', 'boarded_at', 'TEXT');
 ensureColumn('booking_seats', 'boarded_by', 'TEXT');
+ensureColumn('booking_seats', 'concession', 'TEXT');
+ensureColumn('booking_seats', 'seat_fare', 'REAL NOT NULL DEFAULT 0');
+
+// Seed starter demo coupons
+(function seedCoupons() {
+  try {
+    const c = db.prepare('SELECT COUNT(*) as cnt FROM coupons').get()?.cnt || 0;
+    if (c === 0) {
+      const ins = db.prepare('INSERT INTO coupons (code, discount_type, discount_val, min_booking_amount, active) VALUES (?, ?, ?, ?, 1)');
+      ins.run('SEVA50', 'flat', 50, 200);
+      ins.run('SEVA10', 'percent', 10, 0);
+      ins.run('FESTIVAL100', 'flat', 100, 500);
+      ins.run('ROUNDTRIP', 'percent', 15, 300);
+    }
+  } catch (e) {}
+})();
+
+// Seed starter dynamic concessions
+(function seedConcessions() {
+  try {
+    const c = db.prepare('SELECT COUNT(*) as cnt FROM concessions').get()?.cnt || 0;
+    if (c === 0) {
+      const ins = db.prepare('INSERT INTO concessions (name, discount_type, discount_val, min_age, max_age, active) VALUES (?, ?, ?, ?, ?, 1)');
+      ins.run('Senior Citizen', 'percent', 20, 60, null);
+      ins.run('Child', 'percent', 50, null, 10);
+      ins.run('Seva Volunteer / Monk', 'percent', 100, null, null);
+    }
+  } catch (e) {}
+})();
 
 function logAudit(action, entityType, entityId, details, performedBy, role) {
   try {

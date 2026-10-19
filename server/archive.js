@@ -126,7 +126,317 @@ function getGoogleDriveClient() {
 }
 
 /**
- * Builds a ZIP buffer for a specific trip with CSV, Summary, and JSON data
+ * Generates an all-in-one standalone HTML report with complete financials,
+ * agent collections, passenger manifest, and printable PDF styling.
+ */
+function generateTripReportHtml(trip, bookingsWithSeats, cancelled, stats, staffStats) {
+  const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const fmtMoney = (n) => '₹' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+
+  const staffRows = Object.entries(staffStats || {}).map(([staff, d]) => `
+    <tr>
+      <td><b>${esc(staff)}</b></td>
+      <td style="text-align:center;">${d.count}</td>
+      <td style="text-align:center;">${d.seats}</td>
+      <td style="text-align:right;color:#15803D;font-weight:600;">${fmtMoney(d.collected)}</td>
+      <td style="text-align:right;font-weight:600;">${fmtMoney(d.total)}</td>
+    </tr>
+  `).join('');
+
+  let passengerRows = '';
+  bookingsWithSeats.forEach((b) => {
+    const baseFare = Number(b.fare_per_seat || trip.fare || 0);
+    (b.seats || []).forEach((s) => {
+      const seatFare = Number(s.seat_fare != null && s.seat_fare > 0 ? s.seat_fare : (baseFare || 0));
+      const discount = Math.max(0, baseFare - seatFare);
+      const isPaid = b.paid_status === 'Paid';
+      const isBoarded = Boolean(s.boarded);
+
+      passengerRows += `
+        <tr>
+          <td><b style="color:#7C1A22;font-size:14px;">${esc(s.seat_label)}</b></td>
+          <td><span style="font-family:monospace;font-weight:600;">${esc(b.pnr)}</span></td>
+          <td>
+            <b>${esc(s.passenger_name || 'Passenger')}</b>
+            ${s.concession ? `<span class="badge badge-concession">${esc(s.concession)}</span>` : ''}
+          </td>
+          <td>${esc(s.age || '—')} / ${esc(s.gender || '—')}</td>
+          <td>${esc(s.contact || b.group_contact || '—')}</td>
+          <td>${fmtMoney(baseFare)}</td>
+          <td style="color:${discount > 0 ? '#15803D' : '#64748B'};font-weight:600;">${discount > 0 ? '-' + fmtMoney(discount) : '—'}</td>
+          <td><b>${fmtMoney(seatFare)}</b></td>
+          <td>
+            <span class="badge ${isPaid ? 'badge-paid' : 'badge-unpaid'}">${esc(b.paid_status)}</span>
+            <div style="font-size:11px;color:#64748B;margin-top:2px;">${esc(b.payment_method || 'Cash')}</div>
+          </td>
+          <td>${esc(b.pickup_point || 'Default Boarding')}</td>
+          <td><span class="badge ${isBoarded ? 'badge-boarded' : 'badge-pending'}">${isBoarded ? '✓ Boarded' : 'Confirmed'}</span></td>
+          <td style="font-size:12px;color:#64748B;">${esc(b.booked_by || 'Staff')}</td>
+        </tr>
+      `;
+    });
+  });
+
+  const cancelledRows = (cancelled || []).map((c) => `
+    <tr>
+      <td><b>${esc(c.pnr)}</b></td>
+      <td>${esc(c.seats_list || '—')}</td>
+      <td>${esc(c.booked_by || '—')}</td>
+      <td>${esc(c.cancelled_by || '—')}</td>
+      <td>${esc(c.refund_notes || '—')}</td>
+      <td style="text-align:right;">${fmtMoney(c.amount_paid)}</td>
+      <td style="font-size:12px;color:#64748B;">${esc(c.cancelled_at)}</td>
+    </tr>
+  `).join('');
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Trip #${trip.id} Complete Archive Report | Seva Bus Service</title>
+<style>
+  :root {
+    --maroon: #7C1A22;
+    --ink: #1E293B;
+    --ink-soft: #64748B;
+    --line: #E2E8F0;
+    --bg-page: #F8FAFC;
+    --card: #FFFFFF;
+    --ok: #15803D;
+    --err: #B91C1C;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg-page);
+    color: var(--ink);
+    padding: 30px 20px;
+    font-size: 13.5px;
+    line-height: 1.5;
+  }
+  .container {
+    max-width: 1080px;
+    margin: 0 auto;
+    background: var(--card);
+    border-radius: 12px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.06);
+    border: 1px solid var(--line);
+    overflow: hidden;
+  }
+  .header {
+    background: var(--maroon);
+    color: #FFFFFF;
+    padding: 24px 30px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .header-title h1 { font-size: 22px; font-weight: 700; letter-spacing: 0.02em; }
+  .header-title div { font-size: 13px; opacity: 0.9; margin-top: 3px; }
+  .btn-print {
+    background: #FFFFFF;
+    color: var(--maroon);
+    border: none;
+    font-weight: 700;
+    font-size: 13px;
+    padding: 9px 18px;
+    border-radius: 6px;
+    cursor: pointer;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+  }
+  .meta-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    padding: 20px 30px;
+    background: #FDFBF7;
+    border-bottom: 1px solid var(--line);
+  }
+  .meta-item div { font-size: 11.5px; text-transform: uppercase; color: var(--ink-soft); font-weight: 600; }
+  .meta-item b { font-size: 14.5px; color: var(--ink); margin-top: 2px; display: block; }
+
+  .kpi-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    padding: 20px 30px;
+    background: #FFFFFF;
+    border-bottom: 1px solid var(--line);
+  }
+  .kpi-card {
+    background: #F8FAFC;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .kpi-card div { font-size: 11.5px; font-weight: 600; color: var(--ink-soft); }
+  .kpi-card .val { font-size: 18px; font-weight: 700; margin-top: 4px; color: var(--ink); }
+
+  .section { padding: 24px 30px; border-bottom: 1px solid var(--line); }
+  .section:last-child { border-bottom: none; }
+  .section h2 { font-size: 16px; font-weight: 700; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; color: var(--maroon); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--line); }
+  th { background: #F1F5F9; color: var(--ink-soft); font-weight: 700; font-size: 11.5px; text-transform: uppercase; }
+  tr:hover td { background: #F8FAFC; }
+
+  .badge { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .badge-paid { background: #DCFCE7; color: #166534; }
+  .badge-unpaid { background: #FEE2E2; color: #991B1B; }
+  .badge-boarded { background: #DCFCE7; color: #166534; }
+  .badge-pending { background: #FEF3C7; color: #92400E; }
+  .badge-concession { background: #E0F2FE; color: #0369A1; margin-left: 4px; }
+
+  .footer {
+    padding: 16px 30px;
+    background: #F8FAFC;
+    font-size: 12px;
+    color: var(--ink-soft);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  @media print {
+    body { background: #FFFFFF; padding: 0; font-size: 11px; }
+    .no-print { display: none !important; }
+    .container { border: none; box-shadow: none; border-radius: 0; max-width: 100%; }
+    .header { background: #7C1A22 !important; color: #fff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    th { background: #F1F5F9 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <div class="header">
+    <div class="header-title">
+      <h1>SEVA BUS SERVICE — OFFICIAL TRIP REPORT</h1>
+      <div>Complete All-in-One Trip Manifest, Financial Audit & Concession Breakdown</div>
+    </div>
+    <button class="btn-print no-print" onclick="window.print()">🖨️ Print / Save as PDF</button>
+  </div>
+
+  <div class="meta-grid">
+    <div class="meta-item"><div>Trip ID</div><b>#${trip.id}</b></div>
+    <div class="meta-item"><div>Route</div><b>${esc(trip.route_name)} (${esc(trip.source)} ➔ ${esc(trip.destination)})</b></div>
+    <div class="meta-item"><div>Bus & Layout</div><b>${esc(trip.bus_name)} (${esc(trip.pattern || '2+2')} Layout)</b></div>
+    <div class="meta-item"><div>Date & Time</div><b>${esc(trip.date)} at ${esc(trip.time)}</b></div>
+    <div class="meta-item"><div>Standard Fare</div><b>${fmtMoney(trip.fare)} per seat</b></div>
+    <div class="meta-item"><div>Trip Status</div><b style="color:var(--ok);">✓ Archived & Verified</b></div>
+  </div>
+
+  <div class="kpi-row">
+    <div class="kpi-card">
+      <div>Bookings & Occupancy</div>
+      <div class="val">${stats.totalSeatsBooked} seats ${stats.occupancyPct != null ? `<span style="font-size:12px;font-weight:600;color:var(--ok);">(${stats.occupancyPct}% Full)</span>` : ''}</div>
+      <div style="font-size:11px;color:var(--ink-soft);margin-top:2px;">${stats.totalBookings} Bookings ${stats.totalCapacity ? `· Cap: ${stats.totalCapacity}` : ''}</div>
+    </div>
+    <div class="kpi-card">
+      <div>Standard Gross Fare</div>
+      <div class="val">${fmtMoney(stats.totalStandardGross)}</div>
+    </div>
+    <div class="kpi-card">
+      <div>Total Discounts Given</div>
+      <div class="val" style="color:var(--ok);">${stats.totalDiscountsGiven > 0 ? '-' + fmtMoney(stats.totalDiscountsGiven) : '₹0.00'}</div>
+    </div>
+    <div class="kpi-card">
+      <div>Net Revenue</div>
+      <div class="val">${fmtMoney(stats.totalGross)}</div>
+    </div>
+    <div class="kpi-card">
+      <div>Total Paid (Collected)</div>
+      <div class="val" style="color:var(--ok);">${fmtMoney(stats.totalPaid)}</div>
+      <div style="font-size:11px;color:#15803D;margin-top:2px;">Cash: <b>${fmtMoney(stats.cashPaid)}</b> · Online: <b>${fmtMoney(stats.onlinePaid)}</b></div>
+    </div>
+    <div class="kpi-card">
+      <div>Balance Due</div>
+      <div class="val" style="color:${stats.totalDue > 0 ? 'var(--err)' : 'var(--ok)'};">${fmtMoney(stats.totalDue)}</div>
+    </div>
+  </div>
+
+  ${staffRows ? `
+  <div class="section">
+    <h2>👥 Collections by Staff / Booking Agent</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Staff / Agent Name</th>
+          <th style="text-align:center;">Bookings Count</th>
+          <th style="text-align:center;">Seats Booked</th>
+          <th style="text-align:right;">Amount Collected</th>
+          <th style="text-align:right;">Total Fare Value</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${staffRows}
+      </tbody>
+    </table>
+  </div>
+  ` : ''}
+
+  <div class="section">
+    <h2>💺 Complete Passenger Manifest (${stats.totalSeatsBooked} Passengers)</h2>
+    <div style="overflow-x:auto;">
+      <table>
+        <thead>
+          <tr>
+            <th>Seat</th>
+            <th>PNR</th>
+            <th>Passenger Name</th>
+            <th>Age/Gen</th>
+            <th>Phone</th>
+            <th>Base Fare</th>
+            <th>Discount</th>
+            <th>Net Fare</th>
+            <th>Paid Status</th>
+            <th>Pickup Point</th>
+            <th>Boarded</th>
+            <th>Booked By</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${passengerRows || '<tr><td colspan="12" style="text-align:center;color:#64748B;">No passengers recorded for this trip.</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  ${(cancelled && cancelled.length > 0) ? `
+  <div class="section">
+    <h2 style="color:var(--err);">❌ Cancelled Bookings (${cancelled.length})</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>PNR</th>
+          <th>Seats</th>
+          <th>Booked By</th>
+          <th>Cancelled By</th>
+          <th>Refund Notes</th>
+          <th style="text-align:right;">Amount</th>
+          <th>Cancelled At</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${cancelledRows}
+      </tbody>
+    </table>
+  </div>
+  ` : ''}
+
+  <div class="footer">
+    <div>Official Seva Bus Transit Archive System · Generated automatically on ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} (IST)</div>
+    <div>System Verified ✓</div>
+  </div>
+</div>
+
+</body>
+</html>`;
+}
+
+/**
+ * Builds a ZIP buffer for a specific trip with All-in-One HTML, CSV, Summary, and JSON data
  */
 async function buildTripArchive(tripId) {
   const trip = db.prepare(`
@@ -174,43 +484,112 @@ async function buildTripArchive(tripId) {
 
   const totalDue = Math.max(0, totalGross - totalPaid);
 
-  // 1. Generate Passenger_Manifest.csv
+  let cashPaid = 0;
+  let onlinePaid = 0;
+  bookingsWithSeats.forEach((b) => {
+    const paid = Number(b.amount_paid || 0);
+    const method = String(b.payment_method || 'Cash').toLowerCase();
+    if (method === 'cash') {
+      cashPaid += paid;
+    } else {
+      onlinePaid += paid;
+    }
+  });
+
+  const totalCapacity = trip.bus_rows && trip.bus_cols ? (trip.bus_rows * trip.bus_cols) : 0;
+  const occupancyPct = totalCapacity > 0 ? Math.min(100, Math.round((totalSeatsBooked / totalCapacity) * 100)) : null;
+
+  let totalDiscountsGiven = 0;
+  let totalStandardGross = 0;
+
+  bookingsWithSeats.forEach((b) => {
+    const baseFare = Number(b.fare_per_seat || trip.fare || 0);
+    totalDiscountsGiven += Number(b.discount_amount || 0);
+    (b.seats || []).forEach((s) => {
+      const sf = Number(s.seat_fare != null && s.seat_fare > 0 ? s.seat_fare : baseFare);
+      totalStandardGross += baseFare;
+      if (baseFare > sf) {
+        totalDiscountsGiven += (baseFare - sf);
+      }
+    });
+  });
+
+  if (totalStandardGross === 0) totalStandardGross = totalGross;
+
+  // 1. Generate All-in-One Trip_Complete_Report.html
+  const htmlContent = generateTripReportHtml(trip, bookingsWithSeats, cancelled, {
+    totalBookings: bookingsWithSeats.length,
+    totalSeatsBooked,
+    totalCapacity,
+    occupancyPct,
+    totalStandardGross,
+    totalDiscountsGiven,
+    totalGross,
+    totalPaid,
+    cashPaid,
+    onlinePaid,
+    totalDue,
+  }, staffStats);
+
+  // 2. Generate Enhanced Passenger_Manifest.csv (All-in-one Excel Sheet)
+  const csvSummaryBlock = [
+    'SEVA BUS SERVICE - TRIP COMPLETE ARCHIVE & AUDIT MANIFEST',
+    `Trip ID,#${trip.id},Route,"${trip.route_name} (${trip.source} -> ${trip.destination})",Bus,"${trip.bus_name}",Date,${trip.date},Departure,${trip.time}`,
+    `Total Bookings,${bookingsWithSeats.length},Total Seats Booked,${totalSeatsBooked},Standard Fare,Rs. ${totalStandardGross.toFixed(2)},Total Discounts Saved,Rs. ${totalDiscountsGiven.toFixed(2)},Net Payable,Rs. ${totalGross.toFixed(2)},Total Collected,Rs. ${totalPaid.toFixed(2)},Balance Due,Rs. ${totalDue.toFixed(2)}`,
+    '',
+    'COLLECTIONS BY AGENT / STAFF:',
+    'Agent Name,Bookings,Seats Booked,Total Paid,Total Gross',
+    ...Object.entries(staffStats).map(([staff, data]) => 
+      `"${staff}",${data.count},${data.seats},Rs. ${data.collected.toFixed(2)},Rs. ${data.total.toFixed(2)}`
+    ),
+    '',
+    'PASSENGER MANIFEST:',
+  ];
+
   const csvHeaders = [
-    'Booking ID',
+    'Seat',
     'PNR',
-    'Seat Label',
     'Passenger Name',
     'Age',
     'Gender',
-    'Contact',
-    'Boarded Status',
-    'Fare',
+    'Contact Number',
+    'Concession Category',
+    'Standard Fare',
+    'Discount / Concession',
+    'Net Seat Fare',
+    'Paid Status',
     'Amount Paid',
     'Balance Due',
     'Payment Method',
     'Pickup Stop',
+    'Boarding Status',
     'Booked By',
     'Created At',
   ];
 
   const csvRows = [];
   bookingsWithSeats.forEach((b) => {
+    const baseFare = Number(b.fare_per_seat || trip.fare || 0);
     (b.seats || []).forEach((s) => {
-      const seatFare = Number(b.fare_per_seat || 0);
+      const seatFare = Number(s.seat_fare != null && s.seat_fare > 0 ? s.seat_fare : baseFare);
+      const discount = Math.max(0, baseFare - seatFare);
       const row = [
-        b.id,
-        `"${b.pnr}"`,
         `"${s.seat_label}"`,
-        `"${(s.passenger_name || '').replace(/"/g, '""')}"`,
+        `"${b.pnr}"`,
+        `"${(s.passenger_name || 'Passenger').replace(/"/g, '""')}"`,
         s.age || '',
         s.gender || '',
         `"${s.contact || b.group_contact || ''}"`,
-        s.boarded ? 'Boarded' : 'Confirmed',
+        `"${(s.concession || 'General').replace(/"/g, '""')}"`,
+        baseFare,
+        discount > 0 ? -discount : 0,
         seatFare,
+        `"${b.paid_status}"`,
         b.amount_paid,
         Math.max(0, b.total_amount - b.amount_paid),
         `"${b.payment_method || 'Cash'}"`,
         `"${(b.pickup_point || '').replace(/"/g, '""')}"`,
+        s.boarded ? 'Boarded' : 'Confirmed',
         `"${(b.booked_by || '').replace(/"/g, '""')}"`,
         `"${b.created_at || ''}"`,
       ];
@@ -218,9 +597,9 @@ async function buildTripArchive(tripId) {
     });
   });
 
-  const csvContent = '\uFEFF' + [csvHeaders.join(','), ...csvRows].join('\r\n');
+  const csvContent = '\uFEFF' + [...csvSummaryBlock, csvHeaders.join(','), ...csvRows].join('\r\n');
 
-  // 2. Generate Trip_Financial_Summary.txt
+  // 3. Generate Trip_Financial_Summary.txt
   const summaryLines = [
     '======================================================================',
     '                   SEVA BUS SERVICE - TRIP ARCHIVE REPORT             ',
@@ -229,7 +608,7 @@ async function buildTripArchive(tripId) {
     `Trip Date:         ${trip.date}`,
     `Departure Time:    ${trip.time}`,
     `Route:             ${trip.route_name} (${trip.source} -> ${trip.destination})`,
-    `Bus Name:          ${trip.bus_name} (Pattern: ${trip.pattern})`,
+    `Bus Name:          ${trip.bus_name} (Pattern: ${trip.pattern || '2+2'})`,
     `Standard Fare:     Rs. ${trip.fare}`,
     '----------------------------------------------------------------------',
     'PASSENGER & BOOKING STATISTICS:',
@@ -238,7 +617,9 @@ async function buildTripArchive(tripId) {
     `Cancelled Bookings: ${cancelled.length}`,
     '----------------------------------------------------------------------',
     'FINANCIAL SUMMARY:',
-    `Total Gross Fare:  Rs. ${totalGross.toFixed(2)}`,
+    `Standard Gross:    Rs. ${totalStandardGross.toFixed(2)}`,
+    `Total Discounts:   Rs. -${totalDiscountsGiven.toFixed(2)}`,
+    `Net Revenue:       Rs. ${totalGross.toFixed(2)}`,
     `Total Collected:   Rs. ${totalPaid.toFixed(2)}`,
     `Total Balance Due: Rs. ${totalDue.toFixed(2)}`,
     '----------------------------------------------------------------------',
@@ -252,7 +633,7 @@ async function buildTripArchive(tripId) {
   ];
   const summaryContent = summaryLines.join('\r\n');
 
-  // 3. Generate Trip_Full_Backup.json
+  // 4. Generate Trip_Full_Backup.json
   const fullBackupObj = {
     metadata: {
       system: 'Seva Bus Booking System',
@@ -267,6 +648,8 @@ async function buildTripArchive(tripId) {
     stats: {
       totalBookings: bookingsWithSeats.length,
       totalSeatsBooked,
+      totalStandardGross,
+      totalDiscountsGiven,
       totalGross,
       totalPaid,
       totalDue,
@@ -276,8 +659,9 @@ async function buildTripArchive(tripId) {
   };
   const jsonContent = JSON.stringify(fullBackupObj, null, 2);
 
-  // Pack into ZIP
+  // Pack into ZIP: Primary file is the all-in-one Trip_Complete_Report.html!
   const zip = new JSZip();
+  zip.file('Trip_Complete_Report.html', htmlContent);
   zip.file('Passenger_Manifest.csv', csvContent);
   zip.file('Trip_Financial_Summary.txt', summaryContent);
   zip.file('Trip_Full_Backup.json', jsonContent);
@@ -294,6 +678,8 @@ async function buildTripArchive(tripId) {
     trip,
     fileName,
     zipBuffer,
+    htmlContent,
+    csvContent,
     stats: {
       totalBookings: bookingsWithSeats.length,
       totalSeatsBooked,
@@ -525,6 +911,8 @@ module.exports = {
   getTodayDateIST,
   isTripExpired,
   getGoogleDriveClient,
+  cleanDriveFolderId: cleanFolderId,
+  generateTripReportHtml,
   buildTripArchive,
   uploadToGoogleDrive,
   purgeTripFromDatabase,

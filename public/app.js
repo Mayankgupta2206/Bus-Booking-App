@@ -196,13 +196,13 @@ function ensureToastWrap() {
   if (!w) { w = document.createElement('div'); w.id = 'toastwrap'; w.className = 'toastwrap'; document.body.appendChild(w); }
   return w;
 }
-function toast(msg) {
+function toast(msg, isError = false) {
   const w = ensureToastWrap();
   const t = document.createElement('div');
-  t.className = 'toast';
+  t.className = 'toast' + (isError ? ' toast-err' : '');
   t.textContent = msg;
   w.appendChild(t);
-  setTimeout(() => t.remove(), 2500);
+  setTimeout(() => t.remove(), isError ? 3500 : 2500);
 }
 
 /* ---------- App state ---------- */
@@ -273,7 +273,7 @@ function logout() {
   if (inactivityTimer) { clearTimeout(inactivityTimer); inactivityTimer = null; }
   clearToken();
   state.user = null;
-  Cache = { routes: [], buses: [] };
+  Cache = { routes: [], buses: [], concessions: [] };
   usersCache = [];
   adminCtx.usersLoaded = false;
   dashboardCtx.loaded = false;
@@ -281,8 +281,14 @@ function logout() {
 }
 
 async function loadCaches() {
-  const [routes, buses] = await Promise.all([api('/routes'), api('/buses')]);
-  Cache.routes = routes; Cache.buses = buses;
+  const [routes, buses, concessions] = await Promise.all([
+    api('/routes'),
+    api('/buses'),
+    api('/concessions').catch(() => [])
+  ]);
+  Cache.routes = routes;
+  Cache.buses = buses;
+  Cache.concessions = concessions || [];
   loadPublicSettings();
 }
 
@@ -333,7 +339,6 @@ function attachLogin() {
       resetInactivityTimer();
       await loadCaches();
       nav('#/dashboard');
-      setTimeout(() => toast(`Welcome back, ${data.user.name}`), 200);
     } catch (e) {
       errEl.textContent = e.message || 'Invalid username or password.';
       errEl.classList.remove('hidden');
@@ -548,9 +553,15 @@ function shareTicketWhatsapp(booking, trip) {
   const due = Math.max(0, Number(booking.total_amount || 0) - Number(booking.amount_paid || 0));
   const pickup = booking.pickup_point ? `\n📍 *Pickup Stop:* ${booking.pickup_point}` : '';
 
+  const discountAmt = Number(booking.discount_amount || 0);
+  const couponText = booking.coupon_code ? ` (Coupon: ${booking.coupon_code})` : '';
+  const discountLine = discountAmt > 0
+    ? `\n🎁 *Discount Saved:* ₹${discountAmt.toFixed(2)}${couponText}`
+    : '';
+
   const passengerDetails = seats.length > 0
     ? seats.map((s) => {
-      const info = [s.age ? `${s.age}y` : '', s.gender].filter(Boolean).join(' · ');
+      const info = [s.age ? `${s.age}y` : '', s.gender, s.concession].filter(Boolean).join(' · ');
       return `• *Seat ${s.seat_label}:* ${s.passenger_name || 'Passenger'}${info ? ` (${info})` : ''}`;
     }).join('\n')
     : `• *Seat(s):* ${seatListStr}`;
@@ -571,7 +582,7 @@ function shareTicketWhatsapp(booking, trip) {
     '👤 *PASSENGER DETAILS:*',
     passengerDetails,
     '',
-    `💵 *Fare:* ${total} · Paid: ${paid} (${status})${due > 0 ? ` · *Due at Boarding:* ₹${due.toFixed(2)}` : ''}`,
+    `💵 *Fare:* ${total}${discountLine} · Paid: ${paid} (${status})${due > 0 ? ` · *Due at Boarding:* ₹${due.toFixed(2)}` : ''}`,
     '',
     '🎟️ *View Digital Boarding Pass & QR Code:*',
     passUrl,
@@ -697,11 +708,50 @@ async function renderPublicPass() {
     const seatListStr = seats.map((s) => s.seat_label).join(', ');
     const bal = Math.max(0, Number(b.total_amount || 0) - Number(b.amount_paid || 0));
 
+    const discountAmt = Number(b.discount_amount || 0);
+    const couponCode = b.coupon_code ? String(b.coupon_code).trim() : '';
+    const discountReason = b.discount_reason ? String(b.discount_reason).trim() : '';
+
+    const basePerSeat = Number(b.fare_per_seat || 0);
+    let totalConcessionSavings = 0;
+    if (basePerSeat > 0) {
+      seats.forEach(s => {
+        if (s.seat_fare != null && Number(s.seat_fare) < basePerSeat) {
+          totalConcessionSavings += (basePerSeat - Number(s.seat_fare));
+        }
+      });
+    }
+
+    const totalSavings = discountAmt + totalConcessionSavings;
+
+    let discountBlockHtml = '';
+    if (totalSavings > 0 || couponCode || discountReason) {
+      const details = [];
+      if (couponCode) details.push(`Coupon: <b>${esc(couponCode)}</b>`);
+      if (discountReason && discountReason !== couponCode) details.push(esc(discountReason));
+      if (totalConcessionSavings > 0) details.push(`Passenger Concessions`);
+
+      discountBlockHtml = `
+        <div style="background:#F0FDF4;border:1px solid #BBF7D0;border-radius:6px;padding:8px 12px;font-size:12.5px;color:#166534;display:flex;justify-content:space-between;align-items:center;">
+          <div>
+            <span>🏷️ <b>Discount Applied:</b> ${details.join(' · ') || 'Special Discount'}</span>
+          </div>
+          <div style="font-weight:700;font-size:13px;color:#15803D;">
+            Total Saved: -${fmtMoney(totalSavings)}
+          </div>
+        </div>
+      `;
+    }
+
     const rows = seats.map((s) => `
       <tr>
         <td><b>${esc(s.seat_label)}</b></td>
-        <td>${esc(s.passenger_name || 'Passenger')}</td>
+        <td>
+          ${esc(s.passenger_name || 'Passenger')}
+          ${s.concession ? `<span style="display:inline-block;background:#E0F2FE;color:#0369A1;font-size:11px;font-weight:600;padding:1px 6px;border-radius:4px;margin-left:4px;">${esc(s.concession)}</span>` : ''}
+        </td>
         <td>${esc(s.age || '—')} / ${esc(s.gender || '—')}</td>
+        <td>${s.seat_fare != null ? fmtMoney(s.seat_fare) : '—'}</td>
         <td>${isExpired ? '<span style="color:#64748B;font-weight:600;">Trip Completed</span>' : (s.boarded ? '<span style="color:var(--ok);font-weight:600;">✓ Boarded</span>' : '<span style="color:var(--ink-soft);">Confirmed</span>')}</td>
       </tr>
     `).join('');
@@ -761,14 +811,21 @@ async function renderPublicPass() {
 
             <div class="table-wrap">
               <table style="margin-bottom:14px;">
-                <thead><tr><th>Seat</th><th>Passenger</th><th>Age/Gender</th><th>Status</th></tr></thead>
+                <thead><tr><th>Seat</th><th>Passenger</th><th>Age/Gender</th><th>Seat Fare</th><th>Status</th></tr></thead>
                 <tbody>${rows}</tbody>
               </table>
             </div>
 
-            <div class="summary-box" style="margin-top:8px;">
-              <span>Total Fare: <b>${fmtMoney(b.total_amount)}</b> · Paid: <b>${fmtMoney(b.amount_paid)}</b></span>
-              <span>Due: <b style="color:${bal > 0 ? 'var(--err)' : 'var(--ok)'};">${fmtMoney(bal)}</b></span>
+            <div class="summary-box" style="flex-direction:column;align-items:stretch;gap:8px;margin-top:8px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;">
+                <span>Standard Fare: <b>${fmtMoney(Number(b.total_amount || 0) + totalSavings)}</b></span>
+                <span>Discount / Concession: <b style="color:${totalSavings > 0 ? '#15803D' : 'var(--ink-soft)'};">${totalSavings > 0 ? 'Saved -' + fmtMoney(totalSavings) : '₹0.00 (None)'}</b></span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;padding-top:6px;border-top:1px dashed var(--line);font-size:14px;">
+                <span>Total Fare Payable: <b style="font-size:15px;color:var(--ink);">${fmtMoney(b.total_amount)}</b> · Paid: <b>${fmtMoney(b.amount_paid)}</b></span>
+                <span>Due: <b style="color:${bal > 0 ? 'var(--err)' : 'var(--ok)'};font-size:15px;">${fmtMoney(bal)}</b></span>
+              </div>
+              ${discountBlockHtml}
             </div>
 
             ${qrBlockHtml}
@@ -815,14 +872,56 @@ function openTicketModal(booking, trip) {
   closeModal();
   const seats = booking.seats || [];
   const seatListStr = seats.map((s) => s.seat_label).join(', ');
-  const rows = seats.map((s) => `
-    <tr>
-      <td><b>${esc(s.seat_label)}</b></td>
-      <td>${esc(s.passenger_name)}</td>
-      <td>${esc(s.age)} / ${esc(s.gender)}</td>
-      <td>${esc(s.contact || booking.group_contact || '—')}</td>
-    </tr>
-  `).join('');
+  const discountAmt = Number(booking.discount_amount || 0);
+  const couponCode = booking.coupon_code ? String(booking.coupon_code).trim() : '';
+  const discountReason = booking.discount_reason ? String(booking.discount_reason).trim() : '';
+
+  const basePerSeat = Number(booking.fare_per_seat || 0) || (seats.length ? Math.round(Number(booking.total_amount || 0) / seats.length) : 0);
+  let totalConcessionSavings = 0;
+  if (basePerSeat > 0) {
+    seats.forEach(s => {
+      if (s.seat_fare != null && Number(s.seat_fare) > 0 && Number(s.seat_fare) < basePerSeat) {
+        totalConcessionSavings += (basePerSeat - Number(s.seat_fare));
+      }
+    });
+  }
+
+  const totalSavings = discountAmt + totalConcessionSavings;
+
+  let discountBlockHtml = '';
+  if (totalSavings > 0 || couponCode || discountReason) {
+    const details = [];
+    if (couponCode) details.push(`Coupon: <b>${esc(couponCode)}</b>`);
+    if (discountReason && discountReason !== couponCode) details.push(esc(discountReason));
+    if (totalConcessionSavings > 0) details.push(`Passenger Concessions`);
+
+    discountBlockHtml = `
+      <div style="background:#F0FDF4;border:1px solid #BBF7D0;border-radius:6px;padding:8px 12px;font-size:12.5px;color:#166534;display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <span>🏷️ <b>Discount Applied:</b> ${details.join(' · ') || 'Special Discount'}</span>
+        </div>
+        <div style="font-weight:700;font-size:13px;color:#15803D;">
+          Total Saved: -${fmtMoney(totalSavings)}
+        </div>
+      </div>
+    `;
+  }
+
+  const rows = seats.map((s) => {
+    const seatFareStr = (s.seat_fare != null && Number(s.seat_fare) > 0) ? fmtMoney(s.seat_fare) : (basePerSeat > 0 ? fmtMoney(basePerSeat) : '—');
+    return `
+      <tr>
+        <td><b>${esc(s.seat_label)}</b></td>
+        <td>
+          ${esc(s.passenger_name)}
+          ${s.concession ? `<span style="display:inline-block;background:#E0F2FE;color:#0369A1;font-size:11px;font-weight:600;padding:1px 6px;border-radius:4px;margin-left:4px;">${esc(s.concession)}</span>` : ''}
+        </td>
+        <td>${esc(s.age)} / ${esc(s.gender)}</td>
+        <td>${seatFareStr}</td>
+        <td>${esc(s.contact || booking.group_contact || '—')}</td>
+      </tr>
+    `;
+  }).join('');
 
   const bal = Math.max(0, Number(booking.total_amount || 0) - Number(booking.amount_paid || 0));
   const stampClass = booking.paid_status === 'Paid' ? 'stamp-paid' : booking.paid_status === 'Partial' ? 'stamp-partial' : 'stamp-unpaid';
@@ -851,14 +950,21 @@ function openTicketModal(booking, trip) {
 
         <div class="table-wrap">
           <table style="margin-bottom:14px;">
-            <thead><tr><th>Seat</th><th>Passenger</th><th>Age/Gender</th><th>Contact</th></tr></thead>
+            <thead><tr><th>Seat</th><th>Passenger</th><th>Age/Gender</th><th>Seat Fare</th><th>Contact</th></tr></thead>
             <tbody>${rows}</tbody>
           </table>
         </div>
 
-        <div class="summary-box" style="margin-top:8px;">
-          <span>Fare: <b>${fmtMoney(booking.total_amount)}</b> · Paid: <b>${fmtMoney(booking.amount_paid)}</b></span>
-          <span>Balance Due: <b style="color:${bal > 0 ? 'var(--err)' : 'var(--ok)'};">${fmtMoney(bal)}</b></span>
+        <div class="summary-box" style="flex-direction:column;align-items:stretch;gap:8px;margin-top:8px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;">
+            <span>Standard Fare: <b>${fmtMoney(Number(booking.total_amount || 0) + totalSavings)}</b></span>
+            <span>Discount / Concession: <b style="color:${totalSavings > 0 ? '#15803D' : 'var(--ink-soft)'};">${totalSavings > 0 ? 'Saved -' + fmtMoney(totalSavings) : '₹0.00 (None)'}</b></span>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;padding-top:6px;border-top:1px dashed var(--line);font-size:14px;">
+            <span>Total Fare Payable: <b style="font-size:15px;color:var(--ink);">${fmtMoney(booking.total_amount)}</b> · Paid: <b>${fmtMoney(booking.amount_paid)}</b></span>
+            <span>Balance Due: <b style="color:${bal > 0 ? 'var(--err)' : 'var(--ok)'};font-size:15px;">${fmtMoney(bal)}</b></span>
+          </div>
+          ${discountBlockHtml}
         </div>
 
         <div class="ticket-qr-wrap">
@@ -922,48 +1028,196 @@ async function cancelSeatPrompt(bookingId, seatLabel, onComplete) {
   }
 }
 
-function downloadManifestCsv(trip, bookings) {
-  const rows = [];
-  rows.push(['Sr', 'Seat', 'Passenger Name', 'Age', 'Gender', 'Phone', 'Pickup Stop', 'PNR', 'Total Fare', 'Amount Paid', 'Balance Due', 'Payment Status', 'Boarded', 'Booked By', 'Role', 'Booking Time']);
+async function openSeatSwapModal(bookingId, currentSeat, tripId, onComplete) {
+  closeModal();
+  let seatData;
+  try {
+    seatData = await api('/trips/' + tripId + '/seats');
+  } catch (err) {
+    toast('Failed to load trip seats: ' + err.message);
+    return;
+  }
 
+  const availableSeats = [];
+  if (seatData && seatData.grid) {
+    seatData.grid.forEach((row) => {
+      row.forEach((s) => {
+        if (s && !seatData.booked?.[s] && !seatData.locked?.[s] && s !== currentSeat) {
+          availableSeats.push(s);
+        }
+      });
+    });
+  }
+
+  if (availableSeats.length === 0) {
+    toast('No other seats available on this bus to shift to.');
+    return;
+  }
+
+  const optionsHtml = availableSeats.map((s) => `<option value="${esc(s)}">Seat ${esc(s)}</option>`).join('');
+
+  openFormModal({
+    title: '🔄 1-Click Seat Shift / Swap',
+    submitLabel: 'Shift Passenger to New Seat',
+    bodyHtml: `
+      <div style="background:var(--bg-soft,#F9FAFB);padding:12px;border-radius:8px;margin-bottom:14px;border:1px solid var(--border);">
+        <div style="font-size:13px;color:var(--ink-soft);">Currently Occupied Seat:</div>
+        <div style="font-size:18px;font-weight:700;color:var(--brand);">Seat ${esc(currentSeat)}</div>
+      </div>
+      <div class="field">
+        <label for="swapTargetSeat">Select Target Available Seat (${availableSeats.length} open)</label>
+        <select id="swapTargetSeat" style="font-size:15px;font-weight:600;padding:8px 12px;" required>
+          <option value="">-- Choose New Seat --</option>
+          ${optionsHtml}
+        </select>
+        <small style="color:var(--ink-soft);display:block;margin-top:6px;">
+          The passenger's ticket, boarding record, and PNR will automatically shift to the chosen seat without cancellation.
+        </small>
+      </div>
+    `,
+    onSubmit: async () => {
+      const target = document.getElementById('swapTargetSeat').value;
+      if (!target) throw new Error('Please select an available target seat.');
+      const res = await api('/bookings/' + bookingId + '/seats/' + encodeURIComponent(currentSeat) + '/swap', {
+        method: 'POST',
+        body: JSON.stringify({ newSeatLabel: target })
+      });
+      toast(res.message || `Seat shifted to ${target}!`);
+      if (onComplete) await onComplete();
+    }
+  });
+}
+
+function downloadManifestCsv(trip, bookings) {
+  let totalSeatsBooked = 0;
+  let totalStandardGross = 0;
+  let totalDiscountsGiven = 0;
+  let totalGross = 0;
+  let totalPaid = 0;
+  let totalDue = 0;
+  const staffStats = {};
+
+  bookings.forEach((b) => {
+    const seats = b.seats || [];
+    totalSeatsBooked += seats.length;
+    const baseFare = Number(b.fare_per_seat || trip.fare || 0);
+
+    let bStandard = 0;
+    let bActual = 0;
+    seats.forEach((s) => {
+      const sFare = Number(s.seat_fare != null && s.seat_fare > 0 ? s.seat_fare : baseFare);
+      bStandard += baseFare;
+      bActual += sFare;
+    });
+
+    const bDisc = Math.max(0, bStandard - bActual);
+    const bPaid = Number(b.amount_paid || 0);
+    const bTotal = Number(b.total_amount || bActual || 0);
+    const bDue = Math.max(0, bTotal - bPaid);
+
+    totalStandardGross += bStandard;
+    totalDiscountsGiven += bDisc;
+    totalGross += bTotal;
+    totalPaid += bPaid;
+    totalDue += bDue;
+
+    const staff = b.booked_by || 'Staff';
+    if (!staffStats[staff]) {
+      staffStats[staff] = { count: 0, seats: 0, collected: 0, total: 0 };
+    }
+    staffStats[staff].count += 1;
+    staffStats[staff].seats += seats.length;
+    staffStats[staff].collected += bPaid;
+    staffStats[staff].total += bTotal;
+  });
+
+  const lines = [
+    ['SEVA BUS SERVICE - OFFICIAL ALL-IN-ONE MASTER TRIP MANIFEST & FINANCIAL AUDIT'],
+    ['Trip ID: #' + trip.id, 'Route: ' + (trip.route_name || '') + ' (' + (trip.source || '') + ' -> ' + (trip.destination || '') + ')', 'Bus: ' + (trip.bus_name || ''), 'Date: ' + trip.date, 'Departure: ' + trip.time, 'Base Fare: Rs. ' + (trip.fare || 0)],
+    ['--------------------------------------------------------------------------------------------------------------------'],
+    ['EXECUTIVE SUMMARY:'],
+    [
+      'Total Bookings: ' + bookings.length,
+      'Total Seats: ' + totalSeatsBooked,
+      'Standard Gross: Rs. ' + totalStandardGross.toFixed(2),
+      'Total Discounts: -Rs. ' + totalDiscountsGiven.toFixed(2),
+      'Net Revenue: Rs. ' + totalGross.toFixed(2),
+      'Total Collected: Rs. ' + totalPaid.toFixed(2),
+      'Balance Due: Rs. ' + totalDue.toFixed(2)
+    ],
+    ['--------------------------------------------------------------------------------------------------------------------'],
+    ['COLLECTIONS BY AGENT / STAFF:'],
+    ['Staff / Agent Name', 'Bookings Count', 'Seats Booked', 'Amount Collected', 'Total Fare Value'],
+    ...Object.entries(staffStats).map(([staff, d]) => [
+      staff,
+      d.count,
+      d.seats,
+      'Rs. ' + d.collected.toFixed(2),
+      'Rs. ' + d.total.toFixed(2)
+    ]),
+    ['===================================================================================================================='],
+    [],
+    ['PASSENGER MANIFEST:']
+  ];
+
+  const headers = [
+    'Sr', 'Seat', 'PNR', 'Passenger Name', 'Age', 'Gender', 'Contact Number',
+    'Concession Category', 'Standard Base Fare', 'Discount Saved', 'Net Seat Fare',
+    'Paid Status', 'Amount Paid', 'Balance Due', 'Payment Method', 'Pickup Stop',
+    'Boarding Status', 'Booked By', 'Role', 'Booking Time'
+  ];
+
+  const passengerRows = [];
   let sr = 1;
   bookings.forEach((b) => {
     const seats = b.seats || [];
+    const baseFare = Number(b.fare_per_seat || trip.fare || 0);
     seats.forEach((s) => {
+      const seatFare = Number(s.seat_fare != null && s.seat_fare > 0 ? s.seat_fare : baseFare);
+      const discount = Math.max(0, baseFare - seatFare);
       const bal = Math.max(0, Number(b.total_amount || 0) - Number(b.amount_paid || 0));
-      rows.push([
+      passengerRows.push([
         sr++,
         s.seat_label,
-        s.passenger_name,
-        s.age,
-        s.gender,
-        s.contact || b.group_contact || '',
-        b.pickup_point || 'Standard',
         b.pnr,
-        Number(b.total_amount || 0).toFixed(2),
+        s.passenger_name || 'Passenger',
+        s.age || '',
+        s.gender || '',
+        s.contact || b.group_contact || '',
+        s.concession || 'General',
+        baseFare.toFixed(2),
+        discount > 0 ? '-' + discount.toFixed(2) : '0.00',
+        seatFare.toFixed(2),
+        b.paid_status,
         Number(b.amount_paid || 0).toFixed(2),
         bal.toFixed(2),
-        b.paid_status,
-        s.boarded ? 'Yes' : 'No',
+        b.payment_method || 'Cash',
+        b.pickup_point || 'Standard',
+        s.boarded ? 'Boarded' : 'Confirmed',
         b.booked_by,
         b.booked_by_role || '',
-        new Date(b.created_at).toLocaleString('en-IN'),
+        b.created_at ? new Date(b.created_at).toLocaleString('en-IN') : '',
       ]);
     });
   });
 
-  const csvContent = rows.map((r) => r.map((c) => `"${String(c != null ? c : '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+  const allRows = [
+    ...lines,
+    headers,
+    ...passengerRows
+  ];
+
+  const csvContent = '\uFEFF' + allRows.map((r) => r.map((c) => '"' + String(c != null ? c : '').replace(/"/g, '""') + '"').join(',')).join('\r\n');
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   const cleanRoute = (trip.route_name || 'trip').replace(/[^a-zA-Z0-9_-]/g, '_');
-  a.href = url;
-  a.download = `manifest_${cleanRoute}_${trip.date}_${trip.time}.csv`;
+  a.download = 'Trip_' + trip.id + '_Complete_Master_' + cleanRoute + '_' + trip.date + '.csv';
   document.body.appendChild(a);
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
-  toast('Manifest CSV downloaded');
+  toast('Complete All-in-One Master CSV downloaded');
 }
 
 /* ---------- Dashboard ---------- */
@@ -1230,10 +1484,17 @@ function searchView() {
         const rows = seats.map((s) => `
           <tr>
             <td><b>${esc(s.seat_label)}</b></td>
-            <td>${esc(s.passenger_name)}</td>
+            <td>
+              ${esc(s.passenger_name)}
+              ${s.concession ? `<span style="display:inline-block;background:#E0F2FE;color:#0369A1;font-size:11px;font-weight:600;padding:1px 6px;border-radius:4px;margin-left:4px;">${esc(s.concession)}</span>` : ''}
+            </td>
             <td>${esc(s.age)} · ${esc(s.gender)}</td>
+            <td>${s.seat_fare != null ? fmtMoney(s.seat_fare) : '—'}</td>
             <td>${esc(s.contact || b.group_contact || '—')}</td>
             <td>
+              ${(canManage() || roleIs('Supervisor') || b.booked_by_username === state.user.username || canBook()) && b.trip_status === 'Planned'
+            ? `<button class="btn btn-secondary btn-sm" data-swap-seat="${b.id}|${esc(s.seat_label)}|${b.trip_id}" title="Shift to another seat">🔄 Shift</button> `
+            : ''}
               ${seats.length > 1 && (canManage() || roleIs('Supervisor') || b.booked_by_username === state.user.username)
             ? `<button class="btn btn-danger btn-sm" data-cancel-seat="${b.id}|${esc(s.seat_label)}">Release</button>`
             : ''}
@@ -1261,11 +1522,12 @@ function searchView() {
             </div>
             <div style="font-size:13px;color:var(--ink-soft);margin-bottom:8px;">
               Booked by: <b>${esc(b.booked_by)}</b> ${b.booked_by_role ? '(' + esc(b.booked_by_role) + ')' : ''} · Total: <b>${fmtMoney(b.total_amount)}</b> · Paid: <b>${fmtMoney(b.amount_paid)}</b> · Due: <b style="color:${bal > 0 ? 'var(--err)' : 'inherit'};">${fmtMoney(bal)}</b>
+              ${Number(b.discount_amount || 0) > 0 ? ` · <span style="color:#15803D;font-weight:600;">🏷️ Discount: -${fmtMoney(b.discount_amount)}${b.coupon_code ? ' (' + esc(b.coupon_code) + ')' : ''}</span>` : ''}
               ${b.pickup_point ? ` · Pickup: 📍 <b>${esc(b.pickup_point)}</b>` : ''}
             </div>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>Seat</th><th>Passenger Name</th><th>Age / Gender</th><th>Phone</th><th>Action</th></tr></thead>
+                <thead><tr><th>Seat</th><th>Passenger Name</th><th>Age / Gender</th><th>Seat Fare</th><th>Phone</th><th>Action</th></tr></thead>
                 <tbody>${rows}</tbody>
               </table>
             </div>
@@ -1369,6 +1631,13 @@ function attachSearch() {
       cancelSeatPrompt(bId, seatLabel, () => triggerSearch());
     };
   });
+
+  document.querySelectorAll('[data-swap-seat]').forEach((b) => {
+    b.onclick = () => {
+      const [bId, seatLabel, tripId] = b.getAttribute('data-swap-seat').split('|');
+      openSeatSwapModal(bId, seatLabel, tripId, () => triggerSearch());
+    };
+  });
 }
 
 /* ---------- Booking flow ---------- */
@@ -1434,19 +1703,112 @@ function renderTripList(trips, wrap) {
       bookingCtx = {
         step: 2, tripId, trip, seatData, selected: [], pax: {},
         mode: 'individual', groupContact: '', applyAll: true,
-        lead: { name: '', age: '', gender: '' }, advancePaid: '',
+        lead: { name: '', age: '', gender: '', concession: 'General' }, advancePaid: '',
+        couponCode: bookingCtx.couponCode || '', appliedCoupon: '', couponDiscount: 0, manualDiscount: 0, discountReason: '',
       };
       nav('#/booking');
-      toast('Trip selected — choose seats on the map');
-    } catch (err) { toast(err.message); b.disabled = false; b.textContent = 'Select'; }
+    } catch (err) { toast(err.message, true); b.disabled = false; b.textContent = 'Select'; }
   });
 }
 
-function seatMapHtml(grid, booked, selected, interactive) {
+function getSessionId() {
+  let sid = sessionStorage.getItem('seva_session_id');
+  if (!sid) {
+    sid = 'sess_' + Math.random().toString(36).substring(2, 10);
+    sessionStorage.setItem('seva_session_id', sid);
+  }
+  return sid;
+}
+
+function getConcessionOptionsHtml(selectedConc) {
+  const list = Cache.concessions && Cache.concessions.length ? Cache.concessions : [
+    { name: 'Senior Citizen', discount_type: 'percent', discount_val: 20, min_age: 60 },
+    { name: 'Child', discount_type: 'percent', discount_val: 50, max_age: 10 },
+    { name: 'Seva Volunteer / Monk', discount_type: 'percent', discount_val: 100 }
+  ];
+  let html = `<option value="General" ${(!selectedConc || selectedConc === 'General') ? 'selected' : ''}>General (Full Fare)</option>`;
+  list.forEach((c) => {
+    const badge = c.discount_type === 'flat' ? `₹${c.discount_val} Off` : (c.discount_val === 100 ? 'Free' : `${c.discount_val}% Off`);
+    const ageInfo = c.min_age ? ` (${c.min_age}+ yrs)` : (c.max_age ? ` (<${c.max_age} yrs)` : '');
+    html += `<option value="${esc(c.name)}" ${selectedConc === c.name ? 'selected' : ''}>${esc(c.name)}${ageInfo} [${badge}]</option>`;
+  });
+  return html;
+}
+
+function autoDetectConcession(ageStr) {
+  const a = parseInt(ageStr, 10);
+  if (isNaN(a)) return null;
+  const list = Cache.concessions && Cache.concessions.length ? Cache.concessions : [
+    { name: 'Senior Citizen', min_age: 60 },
+    { name: 'Child', max_age: 10 }
+  ];
+  for (const c of list) {
+    if (c.min_age != null && a >= c.min_age) return c.name;
+    if (c.max_age != null && a <= c.max_age) return c.name;
+  }
+  return null;
+}
+
+function computeBookingAmounts() {
+  let fare = Number(bookingCtx.trip?.fare) || 0;
+  if (bookingCtx.pickupPoint) {
+    const stageMatch = String(bookingCtx.pickupPoint).match(/[₹\$\s-]\s*(\d+(\.\d+)?)/);
+    if (stageMatch && Number(stageMatch[1]) > 0) {
+      fare = Number(stageMatch[1]);
+    }
+  }
+  const baseGross = fare * bookingCtx.selected.length;
+  let grossAfterConcession = 0;
+  let concessionSavings = 0;
+
+  const concList = Cache.concessions || [];
+
+  for (const lab of bookingCtx.selected) {
+    const p = (bookingCtx.mode === 'group' && bookingCtx.applyAll) ? bookingCtx.lead : (bookingCtx.pax[lab] || {});
+    const conc = p.concession || 'General';
+    let sf = fare;
+    const rule = concList.find((c) => c.name.toLowerCase() === conc.toLowerCase());
+    if (rule) {
+      if (rule.discount_type === 'flat') {
+        sf = Math.max(0, fare - Number(rule.discount_val));
+      } else {
+        const pct = Math.min(100, Math.max(0, Number(rule.discount_val)));
+        sf = Math.max(0, Math.round(fare * (1 - pct / 100)));
+      }
+    } else {
+      if (conc === 'Senior Citizen') sf = Math.round(fare * 0.8);
+      else if (conc === 'Child') sf = Math.round(fare * 0.5);
+      else if (conc === 'Seva Volunteer / Monk') sf = 0;
+    }
+    grossAfterConcession += sf;
+    concessionSavings += (fare - sf);
+  }
+
+  const couponDisc = Number(bookingCtx.couponDiscount || 0);
+  const manualDisc = Number(bookingCtx.manualDiscount || 0);
+  const totalDiscount = Math.min(grossAfterConcession, couponDisc + manualDisc);
+  const netTotal = Math.max(0, grossAfterConcession - totalDiscount);
+
+  return {
+    baseFare: fare,
+    baseGross,
+    grossAfterConcession,
+    concessionSavings,
+    couponDisc,
+    manualDisc,
+    totalDiscount,
+    netTotal,
+  };
+}
+
+function seatMapHtml(grid, booked, selected, interactive, locked = {}) {
   const width = Math.max(...grid.map((r) => r.length), 1);
+  const mySession = getSessionId();
   const cells = grid.map((row, ri) => row.map((lab, ci) => {
     if (lab == null || lab === '') return `<div class="seat aisle"></div>`;
     if (booked && booked[lab]) return `<div class="seat seat-booked" title="Booked">${esc(lab)}</div>`;
+    const isLockedByOther = locked && locked[lab] && locked[lab].session_id !== mySession;
+    if (isLockedByOther) return `<div class="seat seat-held" title="On hold by ${esc(locked[lab].locked_by)}">${esc(lab)}</div>`;
     const isSel = selected && selected.includes(lab);
     if (!interactive) return `<div class="seat seat-avail">${esc(lab)}</div>`;
     return `<div class="seat ${isSel ? 'seat-sel' : 'seat-avail'}" data-seat="${esc(lab)}">${esc(lab)}</div>`;
@@ -1469,7 +1831,7 @@ function renderPaxCardsHtml() {
         <label class="checkline"><input type="checkbox" id="applyAll" ${bookingCtx.applyAll ? 'checked' : ''}> Same passenger details on all seats</label>
         ${bookingCtx.applyAll ? `
           <div class="field"><label>Passenger Name</label><input id="leadName" value="${esc(bookingCtx.lead.name)}" placeholder="Lead passenger name"></div>
-          <div class="formrow" style="margin-bottom:0;">
+          <div class="formrow" style="margin-bottom:12px;">
             <div class="field"><label>Age</label><input id="leadAge" type="number" value="${esc(bookingCtx.lead.age)}" placeholder="e.g., 35"></div>
             <div class="field"><label>Gender</label>
               <select id="leadGender">
@@ -1479,11 +1841,16 @@ function renderPaxCardsHtml() {
                 <option ${bookingCtx.lead.gender === 'Other' ? 'selected' : ''}>Other</option>
               </select>
             </div>
+          </div>
+          <div class="field" style="margin-bottom:0;"><label>Concession Category</label>
+            <select id="leadConcession">
+              ${getConcessionOptionsHtml(bookingCtx.lead.concession)}
+            </select>
           </div>` : bookingCtx.selected.map((lab) => {
       const p = bookingCtx.pax[lab] || {};
       return `<div class="pax-card nested"><h4>Seat ${esc(lab)}</h4>
               <div class="field"><label>Passenger Name</label><input data-pax="${esc(lab)}|name" value="${esc(p.name || '')}"></div>
-              <div class="formrow" style="margin-bottom:0;">
+              <div class="formrow" style="margin-bottom:8px;">
                 <div class="field"><label>Age</label><input data-pax="${esc(lab)}|age" type="number" value="${esc(p.age || '')}"></div>
                 <div class="field"><label>Gender</label>
                   <select data-pax="${esc(lab)}|gender">
@@ -1493,6 +1860,11 @@ function renderPaxCardsHtml() {
                     <option ${p.gender === 'Other' ? 'selected' : ''}>Other</option>
                   </select>
                 </div>
+              </div>
+              <div class="field" style="margin-bottom:0;"><label>Concession</label>
+                <select data-pax="${esc(lab)}|concession">
+                  ${getConcessionOptionsHtml(p.concession)}
+                </select>
               </div></div>`;
     }).join('')}
       </div>`;
@@ -1503,7 +1875,7 @@ function renderPaxCardsHtml() {
     return `<div class="pax-card">
       <h4>Seat ${esc(lab)}</h4>
       <div class="field"><label>Passenger Name</label><input data-pax="${esc(lab)}|name" value="${esc(p.name || '')}" placeholder="Enter passenger name"></div>
-      <div class="formrow" style="margin-bottom:14px;">
+      <div class="formrow" style="margin-bottom:12px;">
         <div class="field"><label>Age</label><input data-pax="${esc(lab)}|age" type="number" value="${esc(p.age || '')}" placeholder="e.g., 35"></div>
         <div class="field"><label>Gender</label>
           <select data-pax="${esc(lab)}|gender">
@@ -1514,8 +1886,13 @@ function renderPaxCardsHtml() {
           </select>
         </div>
       </div>
-      <div class="field" style="margin-bottom:0;"><label>Phone Number (required)</label>
+      <div class="field" style="margin-bottom:12px;"><label>Phone Number (optional for child under 12)</label>
         <input data-pax="${esc(lab)}|contact" value="${esc(p.contact || '')}" placeholder="10-digit mobile number"></div>
+      <div class="field" style="margin-bottom:0;"><label>Concession Category</label>
+        <select data-pax="${esc(lab)}|concession">
+          ${getConcessionOptionsHtml(p.concession)}
+        </select>
+      </div>
     </div>`;
   }).join('');
 }
@@ -1523,13 +1900,51 @@ function renderPaxCardsHtml() {
 function renderBookingPayBoxHtml() {
   if (!bookingCtx.selected.length) return '';
   const fare = Number(bookingCtx.trip?.fare) || 0;
-  const total = fare * bookingCtx.selected.length;
+  const amounts = computeBookingAmounts();
+
   return `
     <div class="pay-box">
-      <h4>Payment</h4>
+      <h4>Payment & Discounts</h4>
       <div class="summary-box"><span>Seats</span><b>${bookingCtx.selected.length}</b></div>
-      <div class="summary-box"><span>Fare / seat</span><b>${fmtMoney(fare)}</b></div>
-      <div class="summary-box"><span>Total fare</span><b>${fmtMoney(total)}</b></div>
+      <div class="summary-box"><span>Standard Fare</span><b>${fmtMoney(amounts.baseGross)}</b></div>
+      ${amounts.concessionSavings > 0 ? `<div class="summary-box" style="color:var(--ok);"><span>Concession Savings</span><b>-${fmtMoney(amounts.concessionSavings)}</b></div>` : ''}
+
+      <!-- Coupon Section -->
+      <div style="background:#F8FAFC;border:1px dashed var(--line);border-radius:6px;padding:10px;margin:12px 0;">
+        <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--ink-soft);">🎟️ Apply Coupon / Promo Code</div>
+        <div style="display:flex;gap:6px;">
+          <input id="couponCodeInput" placeholder="e.g. SEVA50" value="${esc(bookingCtx.couponCode || '')}" style="text-transform:uppercase;font-size:13px;padding:6px 8px;flex:1;">
+          <button type="button" class="btn btn-secondary btn-sm" id="applyCouponBtn">Apply</button>
+        </div>
+        ${bookingCtx.appliedCoupon ? `
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-top:6px;font-size:12px;color:var(--ok);font-weight:600;">
+            <span>✓ Code "${esc(bookingCtx.appliedCoupon)}" applied (-${fmtMoney(amounts.couponDisc)})</span>
+            <button type="button" id="removeCouponBtn" style="border:none;background:none;color:var(--err);cursor:pointer;font-weight:bold;">✕ Remove</button>
+          </div>
+        ` : ''}
+        <div id="couponMsg" style="font-size:11.5px;margin-top:4px;display:none;"></div>
+      </div>
+
+      <!-- Special / Manual Discount -->
+      <div class="field" style="margin-bottom:10px;">
+        <label style="display:flex;justify-content:space-between;">
+          <span>Special / Manual Discount (₹)</span>
+          <span style="font-size:11px;color:var(--ink-soft);">Optional</span>
+        </label>
+        <input id="manualDiscountInput" type="number" min="0" max="${amounts.grossAfterConcession}" value="${bookingCtx.manualDiscount || ''}" placeholder="0 = no discount">
+      </div>
+      ${(Number(bookingCtx.manualDiscount) > 0) ? `
+        <div class="field" style="margin-bottom:10px;">
+          <label>Discount Reason / Note</label>
+          <input id="manualDiscountReason" value="${esc(bookingCtx.discountReason || '')}" placeholder="e.g. Group booking discount / Staff pass">
+        </div>
+      ` : ''}
+
+      <div class="summary-box" style="border-top:1.5px solid var(--line);padding-top:8px;font-size:15px;">
+        <span><b>Net Total Payable</b></span>
+        <b style="color:var(--maroon);font-size:16px;">${fmtMoney(amounts.netTotal)}</b>
+      </div>
+
       <div class="field" style="margin-top:12px;">
         <label>Payment Method</label>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;" id="bookingMethodGroup">
@@ -1540,10 +1955,10 @@ function renderBookingPayBoxHtml() {
       </div>
       <div class="field" style="margin-top:12px;">
         <label>Advance / amount paid now (₹)</label>
-        <input id="advancePaid" type="number" min="0" max="${total}" step="1" value="${esc(bookingCtx.advancePaid)}" placeholder="0 = unpaid, or enter advance">
+        <input id="advancePaid" type="number" min="0" max="${amounts.netTotal}" step="1" value="${esc(bookingCtx.advancePaid)}" placeholder="0 = unpaid, or enter advance">
       </div>
-      <div class="summary-box"><span>Balance due</span><b id="balanceDue">${fmtMoney(Math.max(0, total - (Number(bookingCtx.advancePaid) || 0)))}</b></div>
-      <div class="summary-box"><span>Status</span><b id="payStatusLabel">${resolvePaidStatus(bookingCtx.advancePaid, total)}</b></div>
+      <div class="summary-box"><span>Balance due</span><b id="balanceDue">${fmtMoney(Math.max(0, amounts.netTotal - (Number(bookingCtx.advancePaid) || 0)))}</b></div>
+      <div class="summary-box"><span>Status</span><b id="payStatusLabel">${resolvePaidStatus(bookingCtx.advancePaid, amounts.netTotal)}</b></div>
       <div class="pay-quick">
         <button type="button" class="btn btn-secondary btn-sm" id="payNone">Unpaid</button>
         <button type="button" class="btn btn-secondary btn-sm" id="payHalf">Half advance</button>
@@ -1559,6 +1974,22 @@ function attachPaxInputs() {
       const [lab, field] = el.getAttribute('data-pax').split('|');
       bookingCtx.pax[lab] = bookingCtx.pax[lab] || {};
       bookingCtx.pax[lab][field] = el.value;
+
+      // Dynamic smart concession auto-detection by age
+      if (field === 'age') {
+        const detected = autoDetectConcession(el.value);
+        if (detected && (!bookingCtx.pax[lab].concession || bookingCtx.pax[lab].concession === 'General')) {
+          bookingCtx.pax[lab].concession = detected;
+          const selEl = document.querySelector(`[data-pax="${lab}|concession"]`);
+          if (selEl) selEl.value = detected;
+        }
+      }
+
+      // Re-sync pay box when concession changes
+      if (field === 'concession' || field === 'age') {
+        const payWrap = document.getElementById('bookingPaymentWrap');
+        if (payWrap) { payWrap.innerHTML = renderBookingPayBoxHtml(); attachPayInputs(); }
+      }
     };
     el.onchange = sync; el.oninput = sync;
   });
@@ -1569,42 +2000,62 @@ function attachPaxInputs() {
     bookingCtx.applyAll = aa.checked;
     const paxWrap = document.getElementById('bookingPaxWrap');
     if (paxWrap) { paxWrap.innerHTML = renderPaxCardsHtml(); attachPaxInputs(); }
+    const payWrap = document.getElementById('bookingPaymentWrap');
+    if (payWrap) { payWrap.innerHTML = renderBookingPayBoxHtml(); attachPayInputs(); }
   };
   const ln = document.getElementById('leadName');
   if (ln) ln.oninput = () => { bookingCtx.lead.name = ln.value; };
   const la = document.getElementById('leadAge');
-  if (la) la.oninput = () => { bookingCtx.lead.age = la.value; };
+  if (la) la.oninput = () => {
+    bookingCtx.lead.age = la.value;
+    const detected = autoDetectConcession(la.value);
+    if (detected && (!bookingCtx.lead.concession || bookingCtx.lead.concession === 'General')) {
+      bookingCtx.lead.concession = detected;
+      const selEl = document.getElementById('leadConcession');
+      if (selEl) selEl.value = detected;
+    }
+    const payWrap = document.getElementById('bookingPaymentWrap');
+    if (payWrap) { payWrap.innerHTML = renderBookingPayBoxHtml(); attachPayInputs(); }
+  };
   const lg = document.getElementById('leadGender');
   if (lg) lg.onchange = () => { bookingCtx.lead.gender = lg.value; };
+  const lc = document.getElementById('leadConcession');
+  if (lc) lc.onchange = () => {
+    bookingCtx.lead.concession = lc.value;
+    const payWrap = document.getElementById('bookingPaymentWrap');
+    if (payWrap) { payWrap.innerHTML = renderBookingPayBoxHtml(); attachPayInputs(); }
+  };
 }
 
 function attachPayInputs() {
-  const ps = document.getElementById('advancePaid');
   const syncPay = () => {
-    const fare = Number(bookingCtx.trip?.fare) || 0;
-    const total = fare * bookingCtx.selected.length;
+    const amounts = computeBookingAmounts();
     const paid = Number(document.getElementById('advancePaid')?.value) || 0;
     bookingCtx.advancePaid = document.getElementById('advancePaid')?.value || '';
     const bal = document.getElementById('balanceDue');
     const lab = document.getElementById('payStatusLabel');
-    if (bal) bal.textContent = fmtMoney(Math.max(0, total - paid));
-    if (lab) lab.textContent = resolvePaidStatus(paid, total);
+    if (bal) bal.textContent = fmtMoney(Math.max(0, amounts.netTotal - paid));
+    if (lab) lab.textContent = resolvePaidStatus(paid, amounts.netTotal);
   };
+
+  const ps = document.getElementById('advancePaid');
   if (ps) { ps.oninput = syncPay; }
+
   const setAdvance = (v) => {
     bookingCtx.advancePaid = String(v);
     const el = document.getElementById('advancePaid');
     if (el) el.value = String(v);
     syncPay();
   };
-  const fareNow = Number(bookingCtx.trip?.fare) || 0;
-  const totalNow = fareNow * bookingCtx.selected.length;
+
+  const amountsNow = computeBookingAmounts();
   const pn = document.getElementById('payNone');
   if (pn) pn.onclick = () => setAdvance(0);
   const ph = document.getElementById('payHalf');
-  if (ph) ph.onclick = () => setAdvance(Math.round(totalNow / 2));
+  if (ph) ph.onclick = () => setAdvance(Math.round(amountsNow.netTotal / 2));
   const pf = document.getElementById('payFull');
-  if (pf) pf.onclick = () => setAdvance(totalNow);
+  if (pf) pf.onclick = () => setAdvance(amountsNow.netTotal);
+
   document.querySelectorAll('#bookingMethodGroup [data-paymethod]').forEach((btn) => {
     btn.onclick = () => {
       document.querySelectorAll('#bookingMethodGroup [data-paymethod]').forEach((b) => b.classList.remove('active'));
@@ -1612,11 +2063,75 @@ function attachPayInputs() {
       bookingCtx.paymentMethod = btn.getAttribute('data-paymethod');
     };
   });
-}
 
+  // Coupon handling
+  const applyBtn = document.getElementById('applyCouponBtn');
+  const codeIn = document.getElementById('couponCodeInput');
+  const couponMsg = document.getElementById('couponMsg');
+
+  if (applyBtn && codeIn) {
+    applyBtn.onclick = async () => {
+      const code = codeIn.value.trim().toUpperCase();
+      if (!code) return;
+      applyBtn.disabled = true; applyBtn.textContent = '...';
+      try {
+        const amounts = computeBookingAmounts();
+        const res = await api('/coupons/validate', {
+          method: 'POST',
+          body: JSON.stringify({ code, grossAmount: amounts.grossAfterConcession })
+        });
+        bookingCtx.appliedCoupon = res.code;
+        bookingCtx.couponCode = res.code;
+        bookingCtx.couponDiscount = res.discountAmount;
+        toast(`Coupon "${res.code}" applied! Saved ₹${res.discountAmount}`);
+        const payWrap = document.getElementById('bookingPaymentWrap');
+        if (payWrap) { payWrap.innerHTML = renderBookingPayBoxHtml(); attachPayInputs(); }
+      } catch (e) {
+        if (couponMsg) {
+          couponMsg.textContent = e.message || 'Invalid coupon code';
+          couponMsg.style.color = 'var(--err)';
+          couponMsg.style.display = 'block';
+        }
+      } finally {
+        applyBtn.disabled = false; applyBtn.textContent = 'Apply';
+      }
+    };
+  }
+
+  const removeCouponBtn = document.getElementById('removeCouponBtn');
+  if (removeCouponBtn) {
+    removeCouponBtn.onclick = () => {
+      bookingCtx.appliedCoupon = '';
+      bookingCtx.couponCode = '';
+      bookingCtx.couponDiscount = 0;
+      toast('Coupon removed');
+      const payWrap = document.getElementById('bookingPaymentWrap');
+      if (payWrap) { payWrap.innerHTML = renderBookingPayBoxHtml(); attachPayInputs(); }
+    };
+  }
+
+  const manualDiscIn = document.getElementById('manualDiscountInput');
+  if (manualDiscIn) {
+    manualDiscIn.oninput = () => {
+      bookingCtx.manualDiscount = Math.max(0, Number(manualDiscIn.value) || 0);
+      syncPay();
+    };
+    manualDiscIn.onchange = () => {
+      const payWrap = document.getElementById('bookingPaymentWrap');
+      if (payWrap) { payWrap.innerHTML = renderBookingPayBoxHtml(); attachPayInputs(); }
+    };
+  }
+
+  const manualReasonIn = document.getElementById('manualDiscountReason');
+  if (manualReasonIn) {
+    manualReasonIn.oninput = () => {
+      bookingCtx.discountReason = manualReasonIn.value;
+    };
+  }
+}
 function bookingStep2() {
   const { trip, seatData, mode } = bookingCtx;
-  const map = seatMapHtml(seatData.grid, seatData.booked, bookingCtx.selected, true);
+  const map = seatMapHtml(seatData.grid, seatData.booked, bookingCtx.selected, true, seatData.locked);
 
   const routeObj = Cache.routes.find((r) => r.id === trip.route_id);
   let pickupStops = [];
@@ -1643,6 +2158,7 @@ function bookingStep2() {
       <div class="legend">
         <span><span class="dot" style="background:var(--seat-avail-bg);border:1.5px solid var(--seat-avail);"></span>Available</span>
         <span><span class="dot" style="background:var(--seat-booked-bg);border:1.5px solid var(--seat-booked);"></span>Booked</span>
+        <span><span class="dot" style="background:#FEF3C7;border:1.5px solid #F59E0B;"></span>On Hold</span>
         <span><span class="dot" style="background:var(--seat-sel);"></span>Selected</span>
       </div>
     </div>
@@ -1677,27 +2193,55 @@ function attachBookingStep2() {
         paxWrap.innerHTML = renderPaxCardsHtml();
         attachPaxInputs();
       }
+      const payWrap = document.getElementById('bookingPaymentWrap');
+      if (payWrap) {
+        payWrap.innerHTML = renderBookingPayBoxHtml();
+        attachPayInputs();
+      }
     };
   });
 
   document.querySelectorAll('[data-seat]').forEach((el) => {
-    el.onclick = () => {
+    el.onclick = async () => {
       const lab = el.getAttribute('data-seat');
       const i = bookingCtx.selected.indexOf(lab);
+      const mySession = getSessionId();
+
       if (i >= 0) {
+        // Deselect seat
         bookingCtx.selected.splice(i, 1);
         delete bookingCtx.pax[lab];
         el.classList.remove('seat-sel');
         el.classList.add('seat-avail');
-        toast(`Seat ${lab} removed`);
+        try {
+          api('/trips/' + bookingCtx.tripId + '/seats/unlock', {
+            method: 'POST',
+            body: JSON.stringify({ seatLabel: lab, sessionId: mySession })
+          }).catch(() => {});
+        } catch (e) {}
       } else {
-        bookingCtx.selected.push(lab);
-        el.classList.remove('seat-avail');
-        el.classList.add('seat-sel');
-        toast(`Seat ${lab} selected`);
+        // Select seat & lock for 5 minutes
+        try {
+          await api('/trips/' + bookingCtx.tripId + '/seats/lock', {
+            method: 'POST',
+            body: JSON.stringify({ seatLabel: lab, sessionId: mySession })
+          });
+          bookingCtx.selected.push(lab);
+          if (window._returnPaxStash && window._returnPaxStash.length) {
+            const nextPax = window._returnPaxStash[bookingCtx.selected.length - 1];
+            if (nextPax) {
+              bookingCtx.pax[lab] = { ...nextPax };
+            }
+          }
+          el.classList.remove('seat-avail');
+          el.classList.add('seat-sel');
+        } catch (err) {
+          toast(err.message || 'Seat is currently unavailable.', true);
+          return;
+        }
       }
 
-      // Smooth in-place updates: ZERO scroll jump, ZERO page re-render!
+      // Smooth in-place updates
       const paxWrap = document.getElementById('bookingPaxWrap');
       if (paxWrap) {
         paxWrap.innerHTML = renderPaxCardsHtml();
@@ -1715,10 +2259,26 @@ function attachBookingStep2() {
   attachPayInputs();
 
   const bp = document.getElementById('bookingPickup');
-  if (bp) bp.onchange = (e) => { bookingCtx.pickupPoint = e.target.value; };
+  if (bp) {
+    bp.onchange = (e) => {
+      bookingCtx.pickupPoint = e.target.value;
+      const payWrap = document.getElementById('bookingPaymentWrap');
+      if (payWrap) {
+        payWrap.innerHTML = renderBookingPayBoxHtml();
+        attachPayInputs();
+      }
+    };
+  }
 
   document.getElementById('cancelBtn').onclick = () => {
-    bookingCtx = { step: 1, tripId: null, selected: [], pax: {}, mode: 'individual', groupContact: '', applyAll: true, lead: { name: '', age: '', gender: '' }, advancePaid: '', paymentMethod: 'Cash', pickupPoint: '' };
+    const mySession = getSessionId();
+    bookingCtx.selected.forEach(lab => {
+      api('/trips/' + bookingCtx.tripId + '/seats/unlock', {
+        method: 'POST',
+        body: JSON.stringify({ seatLabel: lab, sessionId: mySession })
+      }).catch(() => {});
+    });
+    bookingCtx = { step: 1, tripId: null, selected: [], pax: {}, mode: 'individual', groupContact: '', applyAll: true, lead: { name: '', age: '', gender: '', concession: 'General' }, advancePaid: '', paymentMethod: 'Cash', pickupPoint: '', couponCode: '', appliedCoupon: '', couponDiscount: 0, manualDiscount: 0, discountReason: '' };
     nav('#/booking');
   };
   document.getElementById('confirmBtn').onclick = confirmBooking;
@@ -1731,40 +2291,49 @@ async function confirmBooking() {
   errEl.classList.add('hidden');
   if (bookingCtx.selected.length === 0) return showErr('Please select at least one seat.');
 
+  const adultContact = bookingCtx.groupContact || Object.values(bookingCtx.pax).find(p => p && phoneOk(p.contact) && Number(p.age || 0) >= 12)?.contact;
+
   let seats;
   if (bookingCtx.mode === 'group') {
     if (!phoneOk(bookingCtx.groupContact)) return showErr('Enter a valid phone number (at least 10 digits).');
     if (bookingCtx.applyAll) {
-      const { name, age, gender } = bookingCtx.lead;
+      const { name, age, gender, concession } = bookingCtx.lead;
       if (!name || !age || !gender) return showErr('Please fill passenger name, age, and gender.');
       if (age < 0 || age > 120) return showErr('Please enter a valid age (0–120).');
-      seats = bookingCtx.selected.map((lab) => ({ label: lab, name, age, gender, contact: bookingCtx.groupContact }));
+      seats = bookingCtx.selected.map((lab) => ({
+        label: lab, name, age, gender, contact: bookingCtx.groupContact, concession: concession || 'General'
+      }));
     } else {
       seats = [];
       for (const lab of bookingCtx.selected) {
         const p = bookingCtx.pax[lab];
         if (!p || !p.name || !p.age || !p.gender) return showErr(`Please fill details for seat ${lab}.`);
         if (p.age < 0 || p.age > 120) return showErr('Please enter a valid age (0–120).');
-        seats.push({ label: lab, name: p.name, age: p.age, gender: p.gender, contact: bookingCtx.groupContact });
+        seats.push({
+          label: lab, name: p.name, age: p.age, gender: p.gender, contact: bookingCtx.groupContact, concession: p.concession || 'General'
+        });
       }
     }
   } else {
     seats = [];
     for (const lab of bookingCtx.selected) {
       const p = bookingCtx.pax[lab];
-      if (!p || !p.name || !p.age || !p.gender || !p.contact) return showErr('Please fill all required fields including phone number.');
-      if (!phoneOk(p.contact)) return showErr(`Enter a valid phone number for seat ${lab}.`);
+      if (!p || !p.name || !p.age || !p.gender) return showErr('Please fill all required passenger details.');
+      let contact = p.contact;
+      if (!contact && Number(p.age) < 12 && adultContact) {
+        contact = adultContact;
+      }
+      if (!phoneOk(contact)) return showErr(`Enter a valid phone number for seat ${lab}.`);
       if (p.age < 0 || p.age > 120) return showErr('Please enter a valid age (0–120).');
-      seats.push({ label: lab, ...p });
+      seats.push({ label: lab, name: p.name, age: p.age, gender: p.gender, contact, concession: p.concession || 'General' });
     }
   }
 
-  const fare = Number(bookingCtx.trip.fare) || 0;
-  const total = fare * seats.length;
+  const amounts = computeBookingAmounts();
   const advance = Number(bookingCtx.advancePaid);
   const amountPaid = Number.isNaN(advance) || bookingCtx.advancePaid === '' ? 0 : advance;
   if (amountPaid < 0) return showErr('Advance cannot be negative.');
-  if (amountPaid > total) return showErr('Advance cannot exceed total fare.');
+  if (amountPaid > amounts.netTotal + 0.001) return showErr('Advance cannot exceed total fare.');
 
   const btn = document.getElementById('confirmBtn');
   btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Confirming…';
@@ -1779,6 +2348,9 @@ async function confirmBooking() {
         amountPaid,
         pickupPoint: bookingCtx.pickupPoint || null,
         paymentMethod: bookingCtx.paymentMethod || 'Cash',
+        couponCode: bookingCtx.appliedCoupon || null,
+        discountAmount: Number(bookingCtx.manualDiscount || 0),
+        discountReason: bookingCtx.discountReason || null,
       }),
     });
     showConfirmModal(data, seats);
@@ -1828,9 +2400,12 @@ function showConfirmModal(data, seats) {
     <p style="font-size:13.5px;color:var(--ink-soft);margin:0 0 4px;">Trip: ${esc(trip.route_name)}, ${fmtDate(trip.date)}, ${esc(trip.time)}</p>
     <p style="font-size:13.5px;color:var(--ink-soft);margin:0 0 4px;">Booked by: ${esc(state.user.name)} (${esc(state.user.role)})</p>
     ${data.pickupPoint ? `<p style="font-size:13.5px;color:var(--ink-soft);margin:0 0 4px;">Pickup Stop: 📍 <b>${esc(data.pickupPoint)}</b></p>` : ''}
+    ${data.couponCode ? `<p style="font-size:13.5px;color:var(--brand);margin:0 0 4px;">Applied Coupon: 🏷️ <b>${esc(data.couponCode)}</b></p>` : ''}
+    ${data.discountAmount > 0 ? `<p style="font-size:13.5px;color:#059669;margin:0 0 4px;">Total Savings: <b>-${fmtMoney(data.discountAmount)}</b></p>` : ''}
     <p style="font-size:13.5px;color:var(--ink-soft);margin:0 0 14px;">Total: ${fmtMoney(data.totalAmount)} · Paid now: ${fmtMoney(data.amountPaid)} · Balance: ${fmtMoney(Math.max(0, data.totalAmount - data.amountPaid))} · ${esc(data.paidStatus)}</p>
     <div class="table-wrap"><table><thead><tr><th>Seat</th><th>Name</th><th>Age</th><th>Gender</th><th>Phone</th></tr></thead><tbody>${rows}</tbody></table></div>
     <div style="margin-top:18px;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;">
+      <button class="btn btn-secondary" id="modalReturnTripBtn" title="Book return trip with same passengers">🔄 Book Return Trip</button>
       <button class="btn btn-whatsapp" id="modalShareWaBtn">${WA_ICON_SVG} Share WhatsApp</button>
       <button class="btn btn-secondary" id="modalTicketBtn">Print Boarding Pass</button>
       <button class="btn btn-primary" id="modalOk">Done</button>
@@ -1847,6 +2422,35 @@ function showConfirmModal(data, seats) {
     pickup_point: data.pickupPoint,
     seats: seats.map((s) => ({ seat_label: s.label, passenger_name: s.name, age: s.age, gender: s.gender, contact: s.contact })),
   };
+
+  const returnBtn = document.getElementById('modalReturnTripBtn');
+  if (returnBtn) {
+    returnBtn.onclick = () => {
+      div.remove();
+      const currentRoute = Cache.routes.find((r) => r.id === trip.route_id);
+      let returnRouteId = '';
+      if (currentRoute) {
+        const rev = Cache.routes.find((r) =>
+          (r.source && currentRoute.destination && r.source.toLowerCase() === currentRoute.destination.toLowerCase()) ||
+          (r.name && currentRoute.name && r.name.toLowerCase().includes(currentRoute.source.toLowerCase()))
+        );
+        if (rev) returnRouteId = rev.id;
+      }
+      bookingCtx = {
+        step: 1, tripId: null, selected: [], pax: {}, mode: 'individual',
+        groupContact: seats[0]?.contact || '', applyAll: false,
+        lead: { name: seats[0]?.name || '', age: seats[0]?.age || '', gender: seats[0]?.gender || '', concession: 'General' },
+        advancePaid: '', paymentMethod: 'Cash', pickupPoint: '',
+        couponCode: 'ROUNDTRIP', appliedCoupon: '', couponDiscount: 0, manualDiscount: 0, discountReason: '',
+      };
+      window._returnPaxStash = seats.map((s) => ({ name: s.name, age: s.age, gender: s.gender, contact: s.contact, concession: s.concession || 'General' }));
+      nav('#/booking');
+      setTimeout(() => {
+        const rSelect = document.getElementById('fRoute');
+        if (rSelect && returnRouteId) rSelect.value = returnRouteId;
+      }, 100);
+    };
+  }
 
   const waBtn = document.getElementById('modalShareWaBtn');
   if (waBtn) waBtn.onclick = () => shareTicketWhatsapp(confirmObj, trip);
@@ -1995,6 +2599,20 @@ function renderManifestBody({ trip, seatData, bookings }) {
   const cardCollected = bookings.filter((b) => b.payment_method === 'Card').reduce((n, b) => n + Number(b.amount_paid || 0), 0);
   const due = bookings.reduce((n, b) => n + Math.max(0, Number(b.total_amount || 0) - Number(b.amount_paid || 0)), 0);
 
+  // Stop-wise passenger count for live boarding flow
+  const stopCounts = {};
+  bookings.forEach((b) => {
+    const stop = (b.pickup_point || 'Default Boarding').trim();
+    const count = (b.seats && b.seats.length) || 0;
+    stopCounts[stop] = (stopCounts[stop] || 0) + count;
+  });
+
+  const stopBadgesHtml = Object.entries(stopCounts).map(([stop, count]) => `
+    <span style="display:inline-flex;align-items:center;gap:6px;background:#F0FDF4;border:1px solid #BBF7D0;color:#166534;padding:4px 10px;border-radius:20px;font-size:12px;font-weight:600;">
+      📍 <b>${esc(stop)}</b>: <span style="background:#15803D;color:#fff;padding:1px 6px;border-radius:10px;font-size:11px;">${count} pax</span>
+    </span>
+  `).join('');
+
   return `
   <div id="printArea">
     <div class="print-only print-header">
@@ -2008,6 +2626,11 @@ function renderManifestBody({ trip, seatData, bookings }) {
       <span>Collected: <b>${fmtMoney(collected)}</b> <span class="muted" style="font-size:11.5px;">(Cash: <b>${fmtMoney(cashCollected)}</b> · UPI: <b>${fmtMoney(upiCollected)}</b>${cardCollected > 0 ? ' · Card: <b>' + fmtMoney(cardCollected) + '</b>' : ''})</span></span>
       <span>Due: ${fmtMoney(due)}</span>
     </div>
+    ${Object.keys(stopCounts).length ? `
+    <div class="manifest-stops-row" style="background:#FFFFFF;border:1px solid var(--line);border-radius:8px;padding:9px 14px;margin-bottom:12px;display:flex;align-items:center;flex-wrap:wrap;gap:8px;">
+      <span style="font-weight:700;color:var(--ink);font-size:12.5px;display:inline-flex;align-items:center;gap:4px;">🚏 Boarding Flow by Stop:</span>
+      ${stopBadgesHtml}
+    </div>` : ''}
     <div class="boarding-progress-bar no-print">
       <div class="boarding-progress-fill" style="width:${pctBoarded}%"></div>
     </div>
@@ -2019,7 +2642,8 @@ function renderManifestBody({ trip, seatData, bookings }) {
       </div>
       <label class="checkline" style="margin:0;"><input type="checkbox" id="mGroupBy" ${manifestCtx.groupByAgent ? 'checked' : ''}> Separate by booked-by</label>
       <button class="btn btn-primary" id="scanTicketBtn" style="font-weight:600;">📷 Scan Ticket</button>
-      <button class="btn btn-secondary" id="exportCsvBtn">Export CSV</button>
+      <a href="/api/trips/${manifestCtx.tripId}/report?token=${encodeURIComponent(getToken())}" target="_blank" class="btn btn-primary" id="openReportBtn" style="font-weight:600;text-decoration:none;display:inline-flex;align-items:center;gap:6px;" title="Open All-in-One Master Report in new tab">📑 All-in-One Report</a>
+      <button class="btn btn-secondary" id="exportCsvBtn" title="Download Master All-in-One Spreadsheet">📊 Export Master CSV</button>
       <button class="btn btn-secondary" id="printBtn">Print Manifest</button>
     </div>
     <div class="booking-grid print-stack">
@@ -3647,7 +4271,10 @@ function adminTripsPanel() {
   <div class="panel">
     <div class="panel-head">
       <h3>Trips</h3>
-      <button class="btn btn-primary" id="addTripBtn">Schedule Trip</button>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <button class="btn btn-secondary" id="addRecurringTripBtn">🗓️ Recurring Trips</button>
+        <button class="btn btn-primary" id="addTripBtn">Schedule Trip</button>
+      </div>
     </div>
     <div class="formrow" style="margin-bottom:16px;">
       <div class="field"><label for="adminTripDate">Date</label><input id="adminTripDate" type="date" value="${adminCtx.tripDate}"></div>
@@ -3797,10 +4424,12 @@ async function attachAdminRoutesTrips() {
   const addTripBtn = document.getElementById('addTripBtn');
   if (addTripBtn) addTripBtn.onclick = () => openTripForm();
 
+  const addRecurringTripBtn = document.getElementById('addRecurringTripBtn');
+  if (addRecurringTripBtn) addRecurringTripBtn.onclick = () => openRecurringTripsModal();
+
   const reloadTripsBtn = document.getElementById('reloadTripsBtn');
   if (reloadTripsBtn) reloadTripsBtn.onclick = async () => {
     await refreshAdminTripsTable();
-    toast('Trips refreshed');
   };
 
   const tripDateInput = document.getElementById('adminTripDate');
@@ -3920,6 +4549,93 @@ function openTripForm() {
       await loadAdminTrips();
       nav('#/admin/routes-trips', true, false);
     },
+  });
+}
+
+function openRecurringTripsModal() {
+  const activeRoutes = Cache.routes.filter((r) => r.active);
+  const activeBuses = Cache.buses.filter((b) => b.active);
+
+  if (!activeRoutes.length || !activeBuses.length) {
+    toast('Please create at least one active Route and one active Bus first.');
+    return;
+  }
+
+  const rOpts = activeRoutes.map((r) => `<option value="${r.id}">${esc(r.name)} (${fmtMoney(r.fare)})</option>`).join('');
+  const bOpts = activeBuses.map((b) => `<option value="${b.id}">${esc(b.name)} (${b.seatCount || b.cols || b.total_seats || 40} seats)</option>`).join('');
+
+  const start = new Date();
+  start.setDate(start.getDate() + 1);
+  const startStr = start.toISOString().slice(0, 10);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 6);
+  const endStr = end.toISOString().slice(0, 10);
+
+  openFormModal({
+    title: '🗓️ Bulk / Recurring Trip Scheduler',
+    submitLabel: 'Generate Trips',
+    wide: true,
+    bodyHtml: `
+      <p style="color:var(--ink-soft);font-size:13px;margin-bottom:14px;">
+        Schedule daily, weekday, weekend, or custom recurring trips across any date range automatically without duplicates.
+      </p>
+      <div class="formrow" style="margin-bottom:12px;">
+        <div class="field" style="flex:1;">
+          <label for="recRoute">Route</label>
+          <select id="recRoute" required><option value="">Select Route</option>${rOpts}</select>
+        </div>
+        <div class="field" style="flex:1;">
+          <label for="recBus">Bus</label>
+          <select id="recBus" required><option value="">Select Bus</option>${bOpts}</select>
+        </div>
+      </div>
+      <div class="formrow" style="margin-bottom:12px;">
+        <div class="field" style="flex:1;">
+          <label for="recTime">Departure Time</label>
+          <input id="recTime" type="time" required value="08:00">
+        </div>
+        <div class="field" style="flex:1;">
+          <label for="recStartDate">Start Date</label>
+          <input id="recStartDate" type="date" required value="${startStr}">
+        </div>
+        <div class="field" style="flex:1;">
+          <label for="recEndDate">End Date</label>
+          <input id="recEndDate" type="date" required value="${endStr}">
+        </div>
+      </div>
+      <div class="field" style="margin-bottom:8px;">
+        <label style="margin-bottom:6px;display:block;font-weight:600;">Repeat On Days of Week:</label>
+        <div style="display:flex;gap:14px;flex-wrap:wrap;padding:8px 12px;background:var(--bg-soft,#F8FAFC);border-radius:6px;border:1px solid var(--border);">
+          <label class="checkline" style="font-size:13px;margin:0;"><input type="checkbox" name="recDay" value="1" checked> Mon</label>
+          <label class="checkline" style="font-size:13px;margin:0;"><input type="checkbox" name="recDay" value="2" checked> Tue</label>
+          <label class="checkline" style="font-size:13px;margin:0;"><input type="checkbox" name="recDay" value="3" checked> Wed</label>
+          <label class="checkline" style="font-size:13px;margin:0;"><input type="checkbox" name="recDay" value="4" checked> Thu</label>
+          <label class="checkline" style="font-size:13px;margin:0;"><input type="checkbox" name="recDay" value="5" checked> Fri</label>
+          <label class="checkline" style="font-size:13px;margin:0;"><input type="checkbox" name="recDay" value="6" checked> Sat</label>
+          <label class="checkline" style="font-size:13px;margin:0;"><input type="checkbox" name="recDay" value="0" checked> Sun</label>
+        </div>
+      </div>
+    `,
+    onSubmit: async () => {
+      const routeId = Number(document.getElementById('recRoute').value);
+      const busId = Number(document.getElementById('recBus').value);
+      const time = document.getElementById('recTime').value;
+      const startDate = document.getElementById('recStartDate').value;
+      const endDate = document.getElementById('recEndDate').value;
+
+      const checkedBoxes = Array.from(document.querySelectorAll('input[name="recDay"]:checked'));
+      const daysOfWeek = checkedBoxes.map((el) => Number(el.value));
+      if (!daysOfWeek.length) throw new Error('Please select at least one day of the week.');
+
+      const res = await api('/trips/recurring', {
+        method: 'POST',
+        body: JSON.stringify({ routeId, busId, time, startDate, endDate, daysOfWeek })
+      });
+      toast(`Successfully scheduled ${res.count} recurring trips!`);
+      adminCtx.tab = 'trips';
+      adminCtx.tripsLoaded = false;
+      await refreshAdminTripsTable();
+    }
   });
 }
 
@@ -4233,6 +4949,34 @@ function adminSettingsView() {
 
   <div class="panel" style="max-width:720px;margin-top:20px;">
     <div class="panel-head" style="display:flex;justify-content:space-between;align-items:center;">
+      <h3 style="display:flex;align-items:center;gap:8px;">🎫 Passenger Concession Categories &amp; Policies</h3>
+      <button class="btn btn-primary btn-sm" id="addConcessionBtn">+ Add Concession</button>
+    </div>
+    <div style="padding:18px 20px;">
+      <p style="font-size:13px;color:var(--ink-soft);line-height:1.5;margin-bottom:14px;">
+        Configure dynamic concession categories, discounts (% or flat ₹), and qualifying age rules without modifying code.
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Category Name</th>
+              <th>Discount</th>
+              <th>Age Rule</th>
+              <th>Status</th>
+              <th style="text-align:right;">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="concessionsTableBody">
+            <tr><td colspan="5" class="empty"><span class="spin"></span> Loading concessions...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" style="max-width:720px;margin-top:20px;">
+    <div class="panel-head" style="display:flex;justify-content:space-between;align-items:center;">
       <h3 style="display:flex;align-items:center;gap:8px;">📦 Auto-Drive Archive & Google Drive Sync</h3>
       <span class="pill pill-ok" id="archiveStatusBadge" style="font-size:11px;">Checking Drive…</span>
     </div>
@@ -4368,6 +5112,7 @@ async function loadArchiveHistory() {
           <td><b>${fmtMoney(a.total_revenue)}</b></td>
           <td style="text-align:right;white-space:nowrap;">
             ${driveBtn}
+            <a href="/api/archive/view/${a.id}?token=${encodeURIComponent(getToken())}" target="_blank" class="btn btn-primary btn-sm" style="padding:3px 7px;font-size:11px;margin-left:4px;text-decoration:none;" title="Open Complete All-in-One Report">📑 Report</a>
             <button class="btn btn-secondary btn-sm" data-dl-archive="${a.id}" style="padding:3px 7px;font-size:11px;margin-left:4px;">⬇ ZIP</button>
           </td>
         </tr>
@@ -4530,10 +5275,135 @@ async function attachAdminSettings() {
     };
   }
 
+  async function loadConcessionsList() {
+    const tbody = document.getElementById('concessionsTableBody');
+    if (!tbody) return;
+    try {
+      const list = await api('/admin/concessions');
+      Cache.concessions = list.filter((c) => c.active);
+      if (!list.length) {
+        tbody.innerHTML = `<tr><td colspan="5" class="empty">No concessions configured. Click "+ Add Concession" to create one.</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = list.map((c) => `
+        <tr>
+          <td><b>${esc(c.name)}</b></td>
+          <td><span style="font-weight:700;color:var(--brand);">${c.discount_type === 'flat' ? `₹${c.discount_val} Flat Off` : `${c.discount_val}% Off`}</span></td>
+          <td>${c.min_age ? `Age ≥ ${c.min_age} yrs` : (c.max_age ? `Age ≤ ${c.max_age} yrs` : '<span style="color:var(--ink-soft);">All Ages</span>')}</td>
+          <td>${c.active ? '<span class="pill pill-ok">Active</span>' : '<span class="pill pill-off">Inactive</span>'}</td>
+          <td style="text-align:right;">
+            <button class="btn btn-secondary btn-sm" data-edit-conc="${c.id}">Edit</button>
+            <button class="btn btn-danger btn-sm" data-del-conc="${c.id}">Delete</button>
+          </td>
+        </tr>
+      `).join('');
+
+      document.querySelectorAll('[data-edit-conc]').forEach((btn) => {
+        btn.onclick = () => {
+          const id = btn.getAttribute('data-edit-conc');
+          const item = list.find((x) => String(x.id) === String(id));
+          if (item) openConcessionFormModal(item, loadConcessionsList);
+        };
+      });
+
+      document.querySelectorAll('[data-del-conc]').forEach((btn) => {
+        btn.onclick = async () => {
+          const id = btn.getAttribute('data-del-conc');
+          if (!confirm('Delete this concession rule?')) return;
+          try {
+            await api('/admin/concessions/' + id, { method: 'DELETE' });
+            toast('Concession deleted');
+            await loadConcessionsList();
+          } catch (err) {
+            toast(err.message, true);
+          }
+        };
+      });
+    } catch (err) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty" style="color:var(--err);">${esc(err.message)}</td></tr>`;
+    }
+  }
+
+  loadConcessionsList();
+
+  const addConcBtn = document.getElementById('addConcessionBtn');
+  if (addConcBtn) {
+    addConcBtn.onclick = () => openConcessionFormModal(null, loadConcessionsList);
+  }
+
   const refreshBtn = document.getElementById('refreshArchiveHistoryBtn');
   if (refreshBtn) {
     refreshBtn.onclick = () => loadArchiveStatus();
   }
+}
+
+function openConcessionFormModal(item, onDone) {
+  const isEdit = !!item;
+  openFormModal({
+    title: isEdit ? 'Edit Concession Rule' : 'Add Concession Rule',
+    submitLabel: isEdit ? 'Save Changes' : 'Create Concession',
+    bodyHtml: `
+      <div class="field">
+        <label for="concName">Category Name</label>
+        <input id="concName" required value="${item ? esc(item.name) : ''}" placeholder="e.g. Senior Citizen, Student, Defense">
+      </div>
+      <div class="formrow" style="margin-bottom:12px;">
+        <div class="field" style="flex:1;">
+          <label for="concType">Discount Type</label>
+          <select id="concType">
+            <option value="percent" ${item && item.discount_type === 'percent' ? 'selected' : ''}>Percentage (%)</option>
+            <option value="flat" ${item && item.discount_type === 'flat' ? 'selected' : ''}>Flat Amount (₹)</option>
+          </select>
+        </div>
+        <div class="field" style="flex:1;">
+          <label for="concVal">Discount Value</label>
+          <input id="concVal" type="number" min="0" step="1" required value="${item ? Number(item.discount_val) : 20}" placeholder="e.g. 20">
+        </div>
+      </div>
+      <div class="formrow" style="margin-bottom:12px;">
+        <div class="field" style="flex:1;">
+          <label for="concMinAge">Minimum Age Qualifying <small>(Optional)</small></label>
+          <input id="concMinAge" type="number" min="0" max="120" value="${item && item.min_age != null ? item.min_age : ''}" placeholder="e.g. 60">
+        </div>
+        <div class="field" style="flex:1;">
+          <label for="concMaxAge">Maximum Age Qualifying <small>(Optional)</small></label>
+          <input id="concMaxAge" type="number" min="0" max="120" value="${item && item.max_age != null ? item.max_age : ''}" placeholder="e.g. 10">
+        </div>
+      </div>
+      <label class="checkline">
+        <input type="checkbox" id="concActive" ${!item || item.active ? 'checked' : ''}> Active Concession
+      </label>
+    `,
+    onSubmit: async () => {
+      const name = document.getElementById('concName').value.trim();
+      const discount_type = document.getElementById('concType').value;
+      const discount_val = Number(document.getElementById('concVal').value);
+      const minAgeVal = document.getElementById('concMinAge').value;
+      const maxAgeVal = document.getElementById('concMaxAge').value;
+      const min_age = minAgeVal !== '' ? Number(minAgeVal) : null;
+      const max_age = maxAgeVal !== '' ? Number(maxAgeVal) : null;
+      const active = document.getElementById('concActive').checked ? 1 : 0;
+
+      if (!name) throw new Error('Category name is required.');
+      if (isNaN(discount_val) || discount_val < 0) throw new Error('Enter a valid discount value.');
+      if (discount_type === 'percent' && discount_val > 100) throw new Error('Percentage discount cannot exceed 100%.');
+
+      if (isEdit) {
+        await api('/admin/concessions/' + item.id, {
+          method: 'PUT',
+          body: JSON.stringify({ name, discount_type, discount_val, min_age, max_age, active })
+        });
+        toast('Concession updated');
+      } else {
+        await api('/admin/concessions', {
+          method: 'POST',
+          body: JSON.stringify({ name, discount_type, discount_val, min_age, max_age, active })
+        });
+        toast('Concession created');
+      }
+      if (onDone) await onDone();
+    }
+  });
 }
 
 
