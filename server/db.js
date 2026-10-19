@@ -293,14 +293,16 @@ ensureColumn('booking_seats', 'seat_fare', 'REAL NOT NULL DEFAULT 0');
 
 function logAudit(action, entityType, entityId, details, performedBy, role) {
   try {
-    db.prepare('INSERT INTO audit_logs (action, entity_type, entity_id, details, performed_by, role) VALUES (?, ?, ?, ?, ?, ?)')
+    const createdAt = new Date().toISOString();
+    db.prepare('INSERT INTO audit_logs (action, entity_type, entity_id, details, performed_by, role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(
         String(action || ''),
         String(entityType || ''),
         String(entityId || ''),
         typeof details === 'object' ? JSON.stringify(details) : String(details || ''),
         String(performedBy || 'System'),
-        String(role || 'System')
+        String(role || 'System'),
+        createdAt
       );
   } catch (err) {
     console.warn('Audit log write notice:', err.message);

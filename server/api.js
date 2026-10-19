@@ -1649,6 +1649,18 @@ router.post('/bookings/:id/pay-balance', requireAuth, requirePerm('can_collect_p
   res.json({ success: true, booking: { ...updated, seats }, amountPaid: newPaid, paidStatus: newStatus });
 });
 
+function toIsoAuditTime(raw) {
+  if (!raw) return '';
+  let str = String(raw).trim();
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(str)) {
+    str = str.replace(' ', 'T') + 'Z';
+  } else if (!str.endsWith('Z') && !str.includes('+') && str.includes('T')) {
+    str += 'Z';
+  }
+  const d = new Date(str);
+  return isNaN(d.getTime()) ? String(raw) : d.toISOString();
+}
+
 /* ---------- Audit Logs ---------- */
 router.get('/audit-logs', requireAuth, requirePerm('can_view_logs'), (req, res) => {
   if (typeof db.flushAuditLogs === 'function') db.flushAuditLogs();
@@ -1662,7 +1674,7 @@ router.get('/audit-logs', requireAuth, requirePerm('can_view_logs'), (req, res) 
     details: l.details || l.DETAILS || '',
     performed_by: l.performed_by || l.PERFORMED_BY || '',
     role: l.role || l.ROLE || '',
-    created_at: l.created_at || l.CREATED_AT || '',
+    created_at: toIsoAuditTime(l.created_at || l.CREATED_AT),
   }));
   res.json(logs);
 });

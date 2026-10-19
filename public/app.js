@@ -3761,6 +3761,28 @@ function formatAuditDetails(raw) {
   }
 }
 
+function formatAuditTimestamp(raw) {
+  if (!raw) return '—';
+  let str = String(raw).trim();
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(str)) {
+    str = str.replace(' ', 'T') + 'Z';
+  } else if (!str.endsWith('Z') && !str.includes('+') && str.includes('T')) {
+    str += 'Z';
+  }
+  const d = new Date(str);
+  if (isNaN(d.getTime())) return esc(String(raw));
+  return d.toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true
+  });
+}
+
 function renderAuditTableRows(logs, filter) {
   const q = (filter || '').trim().toLowerCase();
   const filtered = q
@@ -3778,7 +3800,7 @@ function renderAuditTableRows(logs, filter) {
 
   return filtered.map((l) => `
     <tr>
-      <td style="white-space:nowrap;font-size:12px;color:var(--ink-soft);">${new Date(l.created_at).toLocaleString('en-IN')}</td>
+      <td style="white-space:nowrap;font-size:12px;color:var(--ink-soft);">${formatAuditTimestamp(l.created_at)}</td>
       <td><span class="${auditBadgeClass(l.action)}">${esc(l.action)}</span></td>
       <td><b>${esc(l.entity_type)}</b> ${l.entity_id ? `· <span class="pnr" style="font-size:12px;">${esc(l.entity_id)}</span>` : ''}</td>
       <td style="font-size:12.5px;">${formatAuditDetails(l.details)}</td>
