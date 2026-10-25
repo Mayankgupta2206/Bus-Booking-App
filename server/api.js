@@ -1649,6 +1649,59 @@ router.post('/bookings/:id/pay-balance', requireAuth, requirePerm('can_collect_p
   res.json({ success: true, booking: { ...updated, seats }, amountPaid: newPaid, paidStatus: newStatus });
 });
 
+/* ---------- Bookings: Post-Booking Discount Adjustment ---------- */
+router.patch('/bookings/:id/discount', requireAuth, requirePerm('can_apply_post_discount'), (req, res) => {
+  const numId = Number(req.params.id);
+  const booking = db.prepare('SELECT * FROM bookings WHERE id = ? OR pnr = ?')
+    .get(!Number.isNaN(numId) ? numId : 0, String(req.params.id));
+  if (!booking) return res.status(404).json({ error: 'Booking not found.' });
+
+  const discountAmount = Number(req.body.discountAmount);
+  const reason = (req.body.reason || '').trim();
+
+  if (Number.isNaN(discountAmount) || discountAmount < 0) {
+    return res.status(400).json({ error: 'Please enter a valid non-negative discount amount.' });
+  }
+
+  if (!reason) {
+    return res.status(400).json({ error: 'A discount reason / note is mandatory for audit trail.' });
+  }
+
+  const currentTotal = Number(booking.total_amount || 0);
+  const currentDiscount = Number(booking.discount_amount || 0);
+  const grossFare = currentTotal + currentDiscount;
+
+  if (discountAmount > grossFare + 0.001) {
+    return res.status(400).json({ error: `Discount cannot exceed total fare of ₹${grossFare.toFixed(2)}.` });
+  }
+
+  const newTotal = Math.max(0, grossFare - discountAmount);
+  const currentPaid = Number(booking.amount_paid || 0);
+  const newStatus = resolvePaidStatus(currentPaid, newTotal);
+
+  try {
+    db.prepare('UPDATE bookings SET total_amount = ?, discount_amount = ?, discount_reason = ?, paid_status = ? WHERE id = ?')
+      .run(newTotal, discountAmount, reason, newStatus, booking.id);
+    db.syncCloud();
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to update discount: ' + err.message });
+  }
+
+  logAudit('DISCOUNT_ADJUSTED', 'BOOKING', booking.pnr, {
+    oldDiscount: currentDiscount,
+    newDiscount: discountAmount,
+    oldTotal: currentTotal,
+    newTotal,
+    amountPaid: currentPaid,
+    reason,
+    adjustedBy: req.user.name
+  }, req.user.name, req.user.role);
+
+  const updated = db.prepare('SELECT * FROM bookings WHERE id = ?').get(booking.id);
+  const seats = db.prepare('SELECT * FROM booking_seats WHERE booking_id = ? ORDER BY CAST(seat_label AS INTEGER), seat_label ASC').all(booking.id);
+  res.json({ success: true, booking: { ...updated, seats }, newTotal, discountAmount, paidStatus: newStatus });
+});
+
 function toIsoAuditTime(raw) {
   if (!raw) return '';
   let str = String(raw).trim();

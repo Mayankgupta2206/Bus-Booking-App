@@ -15,8 +15,13 @@ function signToken(user) {
 const userCache = new Map();
 
 function clearUserCache(userId) {
-  if (userId) userCache.delete(userId);
-  else userCache.clear();
+  if (userId != null) {
+    userCache.delete(userId);
+    userCache.delete(Number(userId));
+    userCache.delete(String(userId));
+  } else {
+    userCache.clear();
+  }
 }
 
 function requireAuth(req, res, next) {

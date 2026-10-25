@@ -431,25 +431,6 @@ function renderBoardingPass(container, b) {
 
   const totalSavings = discountAmt + totalConcessionSavings;
 
-  let discountBlockHtml = '';
-  if (totalSavings > 0 || couponCode || discountReason) {
-    const details = [];
-    if (couponCode) details.push(`Coupon: <b>${esc(couponCode)}</b>`);
-    if (discountReason && discountReason !== couponCode) details.push(esc(discountReason));
-    if (totalConcessionSavings > 0) details.push(`Passenger Concessions`);
-
-    discountBlockHtml = `
-      <div style="background:#F0FDF4;border:1px solid #BBF7D0;border-radius:6px;padding:8px 12px;font-size:12.5px;color:#166534;display:flex;justify-content:space-between;align-items:center;">
-        <div>
-          <span>🏷️ <b>Discount Applied:</b> ${details.join(' · ') || 'Special Discount'}</span>
-        </div>
-        <div style="font-weight:700;font-size:13px;color:#15803D;">
-          Total Saved: -${fmtMoney(totalSavings)}
-        </div>
-      </div>
-    `;
-  }
-
   const rows = seats.map(s => {
     const seatFareStr = (s.seat_fare != null && Number(s.seat_fare) > 0) ? fmtMoney(s.seat_fare) : (basePerSeat > 0 ? fmtMoney(basePerSeat) : '—');
     return `
@@ -532,7 +513,6 @@ function renderBoardingPass(container, b) {
           <span>Total Fare Payable: <b style="color:var(--ink);font-size:15px;">${fmtMoney(b.total_amount)}</b> · Paid: <b>${fmtMoney(b.amount_paid)}</b></span>
           <span>Balance Due: <b style="color:${bal > 0 ? 'var(--err)' : 'var(--ok)'};font-size:15px;">${fmtMoney(bal)}</b></span>
         </div>
-        ${discountBlockHtml}
       </div>
 
       ${qrBlockHtml}

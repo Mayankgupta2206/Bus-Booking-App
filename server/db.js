@@ -275,7 +275,7 @@ ensureColumn('booking_seats', 'seat_fare', 'REAL NOT NULL DEFAULT 0');
       ins.run('FESTIVAL100', 'flat', 100, 500);
       ins.run('ROUNDTRIP', 'percent', 15, 300);
     }
-  } catch (e) {}
+  } catch (e) { }
 })();
 
 // Seed starter dynamic concessions
@@ -288,7 +288,7 @@ ensureColumn('booking_seats', 'seat_fare', 'REAL NOT NULL DEFAULT 0');
       ins.run('Child', 'percent', 50, null, 10);
       ins.run('Seva Volunteer / Monk', 'percent', 100, null, null);
     }
-  } catch (e) {}
+  } catch (e) { }
 })();
 
 function logAudit(action, entityType, entityId, details, performedBy, role) {
@@ -319,7 +319,7 @@ function flushAuditLogs() {
     const existing = db.prepare('SELECT COUNT(*) as c FROM audit_logs').get()?.c || 0;
     if (existing === 0) {
       const insertAudit = db.prepare('INSERT INTO audit_logs (action, entity_type, entity_id, details, performed_by, role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
-      
+
       // 1. Backfill cancelled bookings
       const cancelled = db.prepare('SELECT * FROM cancelled_bookings').all();
       for (const c of cancelled) {
@@ -436,8 +436,9 @@ function flushAuditLogs() {
 function resolvePaidStatus(amountPaid, totalAmount) {
   const paid = Number(amountPaid) || 0;
   const total = Number(totalAmount) || 0;
+  if (total <= 0) return 'Paid';
   if (paid <= 0) return 'Unpaid';
-  if (total > 0 && paid + 0.001 >= total) return 'Paid';
+  if (paid + 0.001 >= total) return 'Paid';
   return 'Partial';
 }
 
@@ -569,6 +570,7 @@ const ALL_PERMISSIONS = [
   'can_book',
   'can_cancel',
   'can_collect_payment',
+  'can_apply_post_discount',
   'can_manifest',
   'can_manage_routes',
   'can_manage_trips',
@@ -587,6 +589,7 @@ function defaultPermissionsForRole(role) {
       can_book: false,
       can_cancel: true,
       can_collect_payment: true,
+      can_apply_post_discount: true,
       can_manifest: true,
       can_manage_routes: false,
       can_manage_trips: false,
@@ -601,6 +604,7 @@ function defaultPermissionsForRole(role) {
     can_book: true,
     can_cancel: true,
     can_collect_payment: false,
+    can_apply_post_discount: false,
     can_manifest: false,
     can_manage_routes: false,
     can_manage_trips: false,

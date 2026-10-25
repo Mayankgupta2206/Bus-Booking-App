@@ -41,6 +41,7 @@ const PERMISSION_DEFINITIONS = [
       { key: 'can_book', name: 'Create Bookings', desc: 'Allows booking seats, selecting routes, and generating PNR passes.' },
       { key: 'can_cancel', name: 'Cancel & Release Seats', desc: 'Allows cancelling bookings and releasing seats back to inventory.' },
       { key: 'can_collect_payment', name: 'Collect Spot Cash / UPI', desc: 'Allows recording cash/UPI balance payments at boarding and updating paid status.' },
+      { key: 'can_apply_post_discount', name: 'Post-Booking Discounts', desc: 'Allows applying or adjusting discounts on existing bookings after reservation.' },
     ]
   },
   {
@@ -67,6 +68,8 @@ const PERMISSION_DEFINITIONS = [
   }
 ];
 
+const TOTAL_POWERS_COUNT = PERMISSION_DEFINITIONS.reduce((acc, cat) => acc + cat.perms.length, 0);
+
 let sysSettings = { passengerPortalUrl: '', companyName: 'Seva Bus Service', supportPhone: '' };
 
 function hasPerm(key) {
@@ -79,6 +82,7 @@ function hasPerm(key) {
   if (key === 'can_book') return roleIs('Admin') || roleIs('Agent');
   if (key === 'can_manifest') return roleIs('Admin') || roleIs('Supervisor');
   if (key === 'can_collect_payment') return roleIs('Admin') || roleIs('Supervisor');
+  if (key === 'can_apply_post_discount') return roleIs('Admin') || roleIs('Supervisor');
   if (key === 'can_cancel') return true;
   if (key === 'can_view_logs') return roleIs('Admin') || roleIs('Supervisor');
   return roleIs('Admin');
@@ -88,6 +92,7 @@ function roleIs(role) { return state.user && state.user.role === role; }
 function canBook() { return hasPerm('can_book'); }
 function canManage() { return hasPerm('can_manage_routes') || hasPerm('can_manage_buses') || hasPerm('can_manage_trips') || hasPerm('can_manage_users') || hasPerm('can_manage_settings'); }
 function canMarkPaid() { return hasPerm('can_collect_payment'); }
+function canApplyPostDiscount() { return hasPerm('can_apply_post_discount'); }
 
 /* ---------- Layout helpers (client) ---------- */
 function parsePattern(pattern) {
@@ -231,8 +236,9 @@ let usersCache = [];
 function resolvePaidStatus(amountPaid, totalAmount) {
   const paid = Number(amountPaid) || 0;
   const total = Number(totalAmount) || 0;
+  if (total <= 0) return 'Paid';
   if (paid <= 0) return 'Unpaid';
-  if (total > 0 && paid + 0.001 >= total) return 'Paid';
+  if (paid + 0.001 >= total) return 'Paid';
   return 'Partial';
 }
 
@@ -905,25 +911,6 @@ function openTicketModal(booking, trip) {
 
   const totalSavings = discountAmt + totalConcessionSavings;
 
-  let discountBlockHtml = '';
-  if (totalSavings > 0 || couponCode || discountReason) {
-    const details = [];
-    if (couponCode) details.push(`Coupon: <b>${esc(couponCode)}</b>`);
-    if (discountReason && discountReason !== couponCode) details.push(esc(discountReason));
-    if (totalConcessionSavings > 0) details.push(`Passenger Concessions`);
-
-    discountBlockHtml = `
-      <div style="background:#F0FDF4;border:1px solid #BBF7D0;border-radius:6px;padding:8px 12px;font-size:12.5px;color:#166534;display:flex;justify-content:space-between;align-items:center;">
-        <div>
-          <span>🏷️ <b>Discount Applied:</b> ${details.join(' · ') || 'Special Discount'}</span>
-        </div>
-        <div style="font-weight:700;font-size:13px;color:#15803D;">
-          Total Saved: -${fmtMoney(totalSavings)}
-        </div>
-      </div>
-    `;
-  }
-
   const rows = seats.map((s) => {
     const seatFareStr = (s.seat_fare != null && Number(s.seat_fare) > 0) ? fmtMoney(s.seat_fare) : (basePerSeat > 0 ? fmtMoney(basePerSeat) : '—');
     return `
@@ -981,7 +968,6 @@ function openTicketModal(booking, trip) {
             <span>Total Fare Payable: <b style="font-size:15px;color:var(--ink);">${fmtMoney(booking.total_amount)}</b> · Paid: <b>${fmtMoney(booking.amount_paid)}</b></span>
             <span>Balance Due: <b style="color:${bal > 0 ? 'var(--err)' : 'var(--ok)'};font-size:15px;">${fmtMoney(bal)}</b></span>
           </div>
-          ${discountBlockHtml}
         </div>
 
         <div class="ticket-qr-wrap">
@@ -994,7 +980,8 @@ function openTicketModal(booking, trip) {
         </div>
       </div>
 
-      <div class="actions-row no-print" style="justify-content:flex-end;margin-top:18px;gap:8px;">
+      <div class="actions-row no-print" style="justify-content:flex-end;margin-top:18px;gap:8px;flex-wrap:wrap;">
+        ${canApplyPostDiscount() ? `<button class="btn btn-secondary" id="ticketDiscountBtn" style="color:var(--maroon);border-color:#FBCFE8;background:#FDF2F8;" title="Apply or adjust post-booking discount">🏷️ Apply Discount</button>` : ''}
         <button class="btn btn-whatsapp" id="ticketShareWaBtn" title="Share via WhatsApp">${WA_ICON_SVG} Share WhatsApp</button>
         <button class="btn btn-secondary" id="ticketCloseBtn">Close</button>
         <button class="btn btn-primary" id="ticketPrintBtn">Print Boarding Pass</button>
@@ -1018,6 +1005,15 @@ function openTicketModal(booking, trip) {
 
   const waBtn = document.getElementById('ticketShareWaBtn');
   if (waBtn) waBtn.onclick = () => shareTicketWhatsapp(booking, trip);
+
+  const discBtn = document.getElementById('ticketDiscountBtn');
+  if (discBtn) {
+    discBtn.onclick = () => {
+      openPostBookingDiscountModal(booking, trip, (updatedBooking) => {
+        openTicketModal(updatedBooking, trip);
+      });
+    };
+  }
 
   document.getElementById('ticketCloseBtn').onclick = () => div.remove();
   document.getElementById('ticketPrintBtn').onclick = () => window.print();
@@ -1534,11 +1530,11 @@ function renderDashboardRecentHtml(stats) {
           <div style="margin-top:2px;">${paidPill(b.paid_status)}</div>
         </td>
         <td>
-          <div style="display:flex;gap:5px;flex-wrap:nowrap;">
-            <button class="btn btn-secondary btn-sm" data-quick-ticket="${b.id}" style="padding:4px 8px;font-size:11.5px;" title="View &amp; print boarding pass">Pass</button>
-            <button class="btn btn-secondary btn-sm" data-quick-wa="${b.id}" style="padding:4px 8px;font-size:11.5px;" title="Send ticket link via WhatsApp">📱 WA</button>
+          <div style="display:flex;gap:5px;flex-wrap:nowrap;align-items:center;">
+            <button class="btn btn-secondary btn-sm" data-quick-ticket="${b.id}" style="padding:3px 8px;font-size:11.5px;" title="View &amp; print boarding pass">Pass</button>
+            <button class="btn btn-whatsapp btn-sm" data-quick-wa="${b.id}" style="padding:3px 8px;font-size:11.5px;display:inline-flex;align-items:center;gap:4px;" title="Share ticket via WhatsApp">${WA_ICON_SVG} WhatsApp</button>
             ${(canManage() || roleIs('Supervisor') || b.booked_by_username === state.user.username)
-          ? `<button class="btn btn-danger btn-sm" data-quick-cancel="${b.id}" data-pnr="${esc(b.pnr)}" style="padding:4px 7px;font-size:11.5px;" title="Cancel booking">✕</button>`
+          ? `<button class="btn btn-danger btn-sm" data-quick-cancel="${b.id}" data-pnr="${esc(b.pnr)}" style="padding:3px 7px;font-size:11.5px;" title="Cancel booking">✕</button>`
           : ''}
           </div>
         </td>
@@ -1838,6 +1834,7 @@ function searchView() {
                 ${paidPill(b.paid_status)}
                 <button class="btn btn-secondary btn-sm" data-view-ticket="${b.id}">Print Pass</button>
                 <button class="btn btn-whatsapp btn-sm" data-search-wa="${b.id}" title="Share via WhatsApp">${WA_ICON_SVG} WhatsApp</button>
+                ${canApplyPostDiscount() ? `<button class="btn btn-secondary btn-sm" data-search-discount="${b.id}" style="color:var(--maroon);border-color:#FBCFE8;background:#FDF2F8;" title="Apply or adjust discount">🏷️ Discount</button>` : ''}
                 ${bal > 0 ? `<button class="btn btn-primary btn-sm" data-search-collect="${b.id}" data-due="${bal}">💳 Collect ₹${bal}</button>` : ''}
                 ${(canManage() || roleIs('Supervisor') || b.booked_by_username === state.user.username)
             ? `<button class="btn btn-danger btn-sm" data-cancel-b="${b.id}" data-pnr="${esc(b.pnr)}">Cancel Booking</button>`
@@ -1926,6 +1923,17 @@ function attachSearch() {
       const bId = b.getAttribute('data-search-wa');
       const booking = (searchCtx.results && searchCtx.results.bookings || []).find((x) => String(x.id) === String(bId));
       if (booking) shareTicketWhatsapp(booking, { route_name: booking.route_name, bus_name: booking.bus_name, date: booking.trip_date, time: booking.trip_time });
+    };
+  });
+
+  document.querySelectorAll('[data-search-discount]').forEach((b) => {
+    b.onclick = () => {
+      const bId = b.getAttribute('data-search-discount');
+      const booking = (searchCtx.results && searchCtx.results.bookings || []).find((x) => String(x.id) === String(bId));
+      if (booking) {
+        const trip = { route_name: booking.route_name, bus_name: booking.bus_name, date: booking.trip_date, time: booking.trip_time };
+        openPostBookingDiscountModal(booking, trip, () => triggerSearch());
+      }
     };
   });
 
@@ -2888,6 +2896,7 @@ function renderManifestBody({ trip, seatData, bookings }) {
           <div style="display:flex;gap:4px;flex-wrap:wrap;">
             <button class="btn btn-secondary btn-sm" data-manifest-ticket="${b.id}" title="Print Boarding Pass">Pass</button>
             <button class="btn btn-whatsapp btn-sm" data-manifest-wa="${b.id}" title="Share via WhatsApp">${WA_ICON_SVG} WhatsApp</button>
+            ${canApplyPostDiscount() ? `<button class="btn btn-secondary btn-sm" data-manifest-discount="${b.id}" style="color:var(--maroon);border-color:#FBCFE8;background:#FDF2F8;" title="Apply or adjust discount">🏷️ Disc</button>` : ''}
             ${b.seats.length > 1 && canCancelThis
           ? `<button class="btn btn-danger btn-sm" data-manifest-cancel-seat="${b.id}|${esc(s.seat_label)}" title="Cancel this seat only">Seat</button>`
           : ''}
@@ -3123,6 +3132,16 @@ async function attachManifest() {
       const bId = btn.getAttribute('data-manifest-ticket');
       const booking = (manifestCtx.data.bookings || []).find((x) => String(x.id) === String(bId));
       if (booking) openTicketModal(booking, manifestCtx.data.trip);
+    };
+  });
+
+  document.querySelectorAll('[data-manifest-discount]').forEach((btn) => {
+    btn.onclick = () => {
+      const bId = btn.getAttribute('data-manifest-discount');
+      const booking = (manifestCtx.data.bookings || []).find((x) => String(x.id) === String(bId));
+      if (booking) {
+        openPostBookingDiscountModal(booking, manifestCtx.data.trip, reloadManifest);
+      }
     };
   });
 
@@ -3600,6 +3619,193 @@ function promptBoardWithDue(booking, trip, seatId, seatLabel, due, paxName, relo
   div.querySelector('#promptCancelBtn').onclick = () => div.remove();
 }
 
+/* ---------- Post-Booking Discount Modal ---------- */
+function openPostBookingDiscountModal(booking, trip, onComplete) {
+  closeModal();
+  const div = document.createElement('div');
+  div.className = 'modal-backdrop';
+  div.id = 'postDiscountModal';
+
+  const currentTotal = Number(booking.total_amount || 0);
+  const currentDiscount = Number(booking.discount_amount || 0);
+  const grossFare = currentTotal + currentDiscount;
+  const currentPaid = Number(booking.amount_paid || 0);
+
+  div.innerHTML = `
+    <div class="modal modal-form" style="max-width:480px;">
+      <h2 style="margin-top:0;display:flex;align-items:center;gap:8px;">
+        <span>🏷️ Post-Booking Discount</span>
+      </h2>
+      <p style="color:var(--ink-soft);font-size:13px;margin:-4px 0 14px;">
+        PNR: <b class="pnr">${esc(booking.pnr)}</b> · ${esc(trip.route_name || trip.route || 'Route')}
+      </p>
+
+      <div id="discModalErr" class="banner banner-err hidden"></div>
+
+      <!-- Current fare breakdown -->
+      <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:12px 14px;margin-bottom:14px;display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px;">
+        <div>
+          <span style="color:#64748B;">Standard Gross Fare:</span><br>
+          <b style="font-size:15px;color:var(--ink);">${fmtMoney(grossFare)}</b>
+        </div>
+        <div>
+          <span style="color:#64748B;">Already Paid:</span><br>
+          <b style="font-size:15px;color:#15803D;">${fmtMoney(currentPaid)}</b>
+        </div>
+        <div>
+          <span style="color:#64748B;">Current Discount:</span><br>
+          <b>${currentDiscount > 0 ? '-' + fmtMoney(currentDiscount) : '₹0.00'}</b>
+        </div>
+        <div>
+          <span style="color:#64748B;">Current Payable:</span><br>
+          <b>${fmtMoney(currentTotal)}</b>
+        </div>
+      </div>
+
+      <!-- Discount Input -->
+      <div class="field">
+        <label for="postDiscountInput">New Total Discount Amount (₹)</label>
+        <div style="display:flex;gap:8px;">
+          <input type="number" id="postDiscountInput" min="0" max="${grossFare}" step="1" value="${currentDiscount}" style="font-size:16px;font-weight:700;" required>
+        </div>
+      </div>
+
+      <!-- Quick presets -->
+      <div style="display:flex;gap:6px;margin:-6px 0 14px;flex-wrap:wrap;">
+        <span style="font-size:12px;color:var(--ink-soft);align-self:center;">Quick:</span>
+        <button type="button" class="btn btn-secondary btn-sm" id="btnDiscAdd50">+₹50</button>
+        <button type="button" class="btn btn-secondary btn-sm" id="btnDiscAdd100">+₹100</button>
+        <button type="button" class="btn btn-secondary btn-sm" id="btnDiscAdd200">+₹200</button>
+        <button type="button" class="btn btn-secondary btn-sm" id="btnDiscFull" style="color:#15803D;">100% Free</button>
+        <button type="button" class="btn btn-secondary btn-sm" id="btnDiscReset" style="color:var(--err);">₹0 (Reset)</button>
+      </div>
+
+      <!-- Reason note (mandatory) -->
+      <div class="field">
+        <label for="postDiscountReason">Reason / Note for Audit Trail <span style="color:var(--err);">*</span></label>
+        <input type="text" id="postDiscountReason" placeholder="e.g. Branch Manager Courtesy Discount / Festival Concession" value="${esc(booking.discount_reason || '')}" required>
+      </div>
+
+      <!-- Real-time calculation preview box -->
+      <div style="background:#F0FDF4;border:1px solid #BBF7D0;border-radius:8px;padding:12px 14px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <div style="font-size:11.5px;color:#166534;font-weight:600;text-transform:uppercase;">New Total Payable</div>
+          <div id="previewNewTotal" style="font-size:20px;font-weight:800;color:#15803D;">${fmtMoney(currentTotal)}</div>
+        </div>
+        <div style="text-align:right;">
+          <div style="font-size:11.5px;color:#166534;" id="previewBalanceLabel">Updated Balance Due</div>
+          <div id="previewBalanceVal" style="font-size:16px;font-weight:700;color:var(--ink);">${fmtMoney(Math.max(0, currentTotal - currentPaid))}</div>
+          <div id="previewStatusBadge" style="margin-top:2px;">${paidPill(booking.paid_status)}</div>
+        </div>
+      </div>
+
+      <div style="display:flex;justify-content:flex-end;gap:8px;">
+        <button type="button" class="btn btn-secondary" id="postDiscountCancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="postDiscountSave">Apply & Update</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(div);
+
+  const input = div.querySelector('#postDiscountInput');
+  const reasonInput = div.querySelector('#postDiscountReason');
+  const errBanner = div.querySelector('#discModalErr');
+  const previewTotal = div.querySelector('#previewNewTotal');
+  const previewBalLabel = div.querySelector('#previewBalanceLabel');
+  const previewBalVal = div.querySelector('#previewBalanceVal');
+  const previewBadge = div.querySelector('#previewStatusBadge');
+  const saveBtn = div.querySelector('#postDiscountSave');
+
+  const updatePreview = () => {
+    let disc = Number(input.value);
+    if (Number.isNaN(disc) || disc < 0) disc = 0;
+    if (disc > grossFare) disc = grossFare;
+
+    const newTot = Math.max(0, grossFare - disc);
+    const newBal = newTot - currentPaid;
+    const newStatus = resolvePaidStatus(currentPaid, newTot);
+
+    previewTotal.textContent = fmtMoney(newTot);
+    if (newBal >= 0) {
+      previewBalLabel.textContent = 'Updated Balance Due';
+      previewBalVal.textContent = fmtMoney(newBal);
+      previewBalVal.style.color = newBal > 0 ? 'var(--err)' : 'var(--ok)';
+    } else {
+      previewBalLabel.textContent = 'Refund / Excess Paid';
+      previewBalVal.textContent = fmtMoney(Math.abs(newBal));
+      previewBalVal.style.color = 'var(--maroon)';
+    }
+    previewBadge.innerHTML = paidPill(newStatus);
+  };
+
+  input.addEventListener('input', updatePreview);
+
+  div.querySelector('#btnDiscAdd50').onclick = () => {
+    input.value = Math.min(grossFare, (Number(input.value) || 0) + 50);
+    updatePreview();
+  };
+  div.querySelector('#btnDiscAdd100').onclick = () => {
+    input.value = Math.min(grossFare, (Number(input.value) || 0) + 100);
+    updatePreview();
+  };
+  div.querySelector('#btnDiscAdd200').onclick = () => {
+    input.value = Math.min(grossFare, (Number(input.value) || 0) + 200);
+    updatePreview();
+  };
+  div.querySelector('#btnDiscFull').onclick = () => {
+    input.value = grossFare;
+    updatePreview();
+  };
+  div.querySelector('#btnDiscReset').onclick = () => {
+    input.value = 0;
+    updatePreview();
+  };
+
+  div.querySelector('#postDiscountCancel').onclick = () => div.remove();
+
+  saveBtn.onclick = async () => {
+    const disc = Number(input.value);
+    const reason = reasonInput.value.trim();
+    errBanner.classList.add('hidden');
+
+    if (Number.isNaN(disc) || disc < 0) {
+      errBanner.textContent = 'Please enter a valid non-negative discount amount.';
+      errBanner.classList.remove('hidden');
+      return;
+    }
+    if (disc > grossFare) {
+      errBanner.textContent = `Discount cannot exceed total fare of ${fmtMoney(grossFare)}.`;
+      errBanner.classList.remove('hidden');
+      return;
+    }
+    if (!reason) {
+      errBanner.textContent = 'Please provide a discount reason or note for audit verification.';
+      errBanner.classList.remove('hidden');
+      reasonInput.focus();
+      return;
+    }
+
+    saveBtn.disabled = true;
+    saveBtn.innerHTML = '<span class="spin"></span>Applying…';
+
+    try {
+      const res = await api(`/bookings/${booking.id}/discount`, {
+        method: 'PATCH',
+        body: JSON.stringify({ discountAmount: disc, reason })
+      });
+      toast(`Discount applied! New total: ${fmtMoney(res.newTotal)}`);
+      div.remove();
+      if (onComplete) await onComplete(res.booking);
+    } catch (err) {
+      errBanner.textContent = err.message || 'Failed to apply discount.';
+      errBanner.classList.remove('hidden');
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Apply & Update';
+    }
+  };
+}
+
 function openSpotPaymentModal(booking, trip, defaultDue, passengerName, onComplete) {
   closeModal();
   const div = document.createElement('div');
@@ -3648,9 +3854,14 @@ function openSpotPaymentModal(booking, trip, defaultDue, passengerName, onComple
         <span><b>Mark passenger as Boarded</b> upon payment</span>
       </label>
 
-      <div style="display:flex;justify-content:flex-end;gap:8px;">
-        <button type="button" class="btn btn-secondary" id="spotPayCancel">Cancel</button>
-        <button type="button" class="btn btn-primary" id="spotPaySubmit">Confirm & Collect</button>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;gap:8px;flex-wrap:wrap;">
+        <div>
+          ${canApplyPostDiscount() ? `<button type="button" class="btn btn-secondary btn-sm" id="spotOpenDiscountBtn" style="color:var(--maroon);border-color:#FBCFE8;background:#FDF2F8;" title="Adjust or apply discount before collection">🏷️ Adjust Discount</button>` : ''}
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button type="button" class="btn btn-secondary" id="spotPayCancel">Cancel</button>
+          <button type="button" class="btn btn-primary" id="spotPaySubmit">Confirm & Collect</button>
+        </div>
       </div>
     </div>
   `;
@@ -3660,6 +3871,17 @@ function openSpotPaymentModal(booking, trip, defaultDue, passengerName, onComple
   const amountInput = div.querySelector('#spotPayAmount');
   const errBanner = div.querySelector('#spotPayErr');
   const submitBtn = div.querySelector('#spotPaySubmit');
+
+  const spotDiscBtn = div.querySelector('#spotOpenDiscountBtn');
+  if (spotDiscBtn) {
+    spotDiscBtn.onclick = () => {
+      div.remove();
+      openPostBookingDiscountModal(booking, trip, (updated) => {
+        const newDue = Math.max(0, Number(updated.total_amount || 0) - Number(updated.amount_paid || 0));
+        openSpotPaymentModal(updated, trip, newDue, passengerName, onComplete);
+      });
+    };
+  }
 
   div.querySelectorAll('#spotMethodGroup button').forEach((btn) => {
     btn.onclick = () => {
@@ -5005,7 +5227,7 @@ function adminUsersView() {
     const p = u.permissions || {};
     const count = Object.values(p).filter(Boolean).length;
     const powerBadge = u.role === 'Admin'
-      ? `<span class="pill pill-err" title="Super Admin has all operational powers">👑 Full Admin (10 Powers)</span>`
+      ? `<span class="pill pill-err" title="Super Admin has all operational powers">👑 Full Admin (${TOTAL_POWERS_COUNT} Powers)</span>`
       : `<button type="button" class="pill pill-ok" data-powers-user="${u.id}" style="cursor:pointer;border:none;display:inline-flex;align-items:center;gap:4px;" title="Click to view/edit powers">⚡ ${count} Powers Active ✎</button>`;
 
     return `
@@ -5130,7 +5352,7 @@ function openUserPermissionsModal(user) {
   const countActive = () => Object.values(currentPerms).filter(Boolean).length;
 
   const renderModalBody = () => {
-    const totalCount = 10;
+    const totalCount = TOTAL_POWERS_COUNT;
     const active = countActive();
 
     const categoriesHtml = PERMISSION_DEFINITIONS.map((cat) => {
@@ -5214,7 +5436,7 @@ function openUserPermissionsModal(user) {
     });
     const label = document.getElementById('powersCountLabel');
     if (label) {
-      label.innerHTML = `Active Powers: <b style="color:var(--ok);">${countActive()}</b> / 10`;
+      label.innerHTML = `Active Powers: <b style="color:var(--ok);">${countActive()}</b> / ${TOTAL_POWERS_COUNT}`;
     }
   };
 
@@ -5224,7 +5446,7 @@ function openUserPermissionsModal(user) {
       currentPerms[key] = e.target.checked;
       const label = document.getElementById('powersCountLabel');
       if (label) {
-        label.innerHTML = `Active Powers: <b style="color:var(--ok);">${countActive()}</b> / 10`;
+        label.innerHTML = `Active Powers: <b style="color:var(--ok);">${countActive()}</b> / ${TOTAL_POWERS_COUNT}`;
       }
     };
   });
@@ -5253,6 +5475,7 @@ function openUserPermissionsModal(user) {
       PERMISSION_DEFINITIONS.forEach(cat => cat.perms.forEach(p => { currentPerms[p.key] = false; }));
       currentPerms.can_manifest = true;
       currentPerms.can_collect_payment = true;
+      currentPerms.can_apply_post_discount = true;
       currentPerms.can_cancel = true;
       currentPerms.can_view_logs = true;
       updateSwitchesFromState();
